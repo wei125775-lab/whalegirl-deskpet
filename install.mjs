@@ -1,5 +1,5 @@
 /**
- * Install @wei125775-lab/dsh-pet-whalegirl into a dsh web profile.
+ * Install @wei125775-lab/whalegirl-deskpet into a dsh web profile.
  *
  * Copies this package into <DSH_HOME>/profiles/<profile>/node_modules/ and
  * wires it into that profile's package.json (dependencies + dsh.profile.bundles).
@@ -17,7 +17,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const PKG_NAME = '@wei125775-lab/dsh-pet-whalegirl'
+const PKG_NAME = '@wei125775-lab/whalegirl-deskpet'
 /** Bundle whose apply must come after ours, so the pet is on disk in time. */
 const ANCHOR = '@linxin666/dsh-pet'
 /** Pet dependency: without it the released files have nothing to render them. */

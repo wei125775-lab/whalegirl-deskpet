@@ -1,4 +1,4 @@
-# dsh-pet-whalegirl
+# whalegirl-deskpet
 
 一只鲸鱼娘桌宠，同一个角色的两个平台版本：
 
@@ -23,7 +23,7 @@
 
 **双击 `install.cmd`**（或者 `node install.mjs`）。它做三件事：
 
-1. 把包复制到 `<DSH_HOME>/profiles/web/node_modules/@wei125775-lab/dsh-pet-whalegirl/`
+1. 把包复制到 `<DSH_HOME>/profiles/web/node_modules/@wei125775-lab/whalegirl-deskpet/`
 2. 在 profile 的 `package.json` 里加 `dependencies` 条目和 `dsh.profile.bundles` 条目
 3. 备份改之前的 manifest 到 `package.json.bak-whalegirl`
 
@@ -59,7 +59,7 @@
 
 删掉这三处：
 
-- `<DSH_HOME>/profiles/web/node_modules/@wei125775-lab/dsh-pet-whalegirl/`
+- `<DSH_HOME>/profiles/web/node_modules/@wei125775-lab/whalegirl-deskpet/`
 - profile `package.json` 里的 `dependencies` 条目和 `bundles` 条目（或直接用 `package.json.bak-whalegirl` 覆盖回去）
 - `<DSH_HOME>/pets/whalegirl-hd/`（插件释放出来的，不删会继续出现在宠物列表里）
 
