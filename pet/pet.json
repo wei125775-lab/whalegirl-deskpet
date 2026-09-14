@@ -1,0 +1,231 @@
+{
+  "petManifestVersion": 2,
+  "id": "whalegirl-hd",
+  "displayName": "鲸鱼娘",
+  "description": "自己做的鲸鱼娘：待机是分层烘焙的呼吸+飘发+眨眼，其余动作由 AI 视频转序列帧。干活时捧着碗一直吃，干完收碗，点她会挥手/比心。",
+  "version": "1.1.0",
+  "author": "wei125775-lab",
+  "license": "MIT",
+  "renderer": "frames2d",
+  "frames2d": {
+    "dir": "frames",
+    "defaultFrameMs": 83,
+    "tracks": {
+      "idle": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png",
+          "f18.png",
+          "f19.png",
+          "f20.png",
+          "f21.png",
+          "f22.png",
+          "f23.png",
+          "f24.png"
+        ]
+      },
+      "eat": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f12.png",
+          "f11.png",
+          "f10.png",
+          "f09.png",
+          "f08.png",
+          "f07.png",
+          "f06.png",
+          "f05.png",
+          "f04.png",
+          "f03.png",
+          "f02.png"
+        ]
+      },
+      "putaway": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png"
+        ],
+        "frameMs": [125, 125, 125, 125, 125, 125, 125, 125, 125],
+        "loop": false
+      },
+      "wave": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png",
+          "f18.png",
+          "f19.png",
+          "f20.png",
+          "f21.png",
+          "f22.png",
+          "f23.png",
+          "f24.png",
+          "f25.png",
+          "f26.png",
+          "f27.png",
+          "f28.png",
+          "f29.png",
+          "f30.png"
+        ],
+        "loop": false
+      },
+      "heart": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png",
+          "f18.png",
+          "f19.png",
+          "f20.png",
+          "f21.png",
+          "f22.png",
+          "f23.png",
+          "f24.png",
+          "f25.png",
+          "f26.png",
+          "f27.png",
+          "f28.png",
+          "f29.png",
+          "f30.png"
+        ],
+        "loop": false
+      },
+      "touchface": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png",
+          "f18.png",
+          "f19.png",
+          "f20.png",
+          "f21.png",
+          "f22.png",
+          "f23.png",
+          "f24.png",
+          "f25.png",
+          "f26.png",
+          "f27.png",
+          "f28.png",
+          "f29.png",
+          "f30.png"
+        ]
+      }
+    },
+    "phases": {
+      "idle": "idle",
+      "waiting": "eat",
+      "thinking": "eat",
+      "tool": "eat",
+      "review": "eat",
+      "done": "idle",
+      "failed": "touchface"
+    }
+  },
+  "gameplay": {
+    "touch": {
+      "zones": [
+        {
+          "name": "pet",
+          "y0": 0,
+          "y1": 1,
+          "branches": [
+            {
+              "probability": 0.15,
+              "state": "heart",
+              "stateMs": 2700,
+              "phrases": ["比个心～", "喜欢你哦", "拿去拿去"]
+            },
+            {
+              "probability": 0.2,
+              "state": "touchface",
+              "stateMs": 3200,
+              "phrases": ["在想事情呢", "唔……"]
+            },
+            {
+              "probability": 0.65,
+              "state": "wave",
+              "stateMs": 2700,
+              "phrases": ["嗨～", "在呢在呢", "要摸摸头吗？", "尾巴甩甩～"]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+# @wei125775-lab/dsh-pet-whalegirl bundle patch
+#
+# 只 insert 自己。宠物素材由 lib/index.js 在模块加载时释放到
+# $DSH_HOME/pets/whalegirl-hd/，不经过 cordis 的注册机制。
+- insert:
+    - id: dsh-pet-whalegirl
+      name: '@wei125775-lab/dsh-pet-whalegirl'
