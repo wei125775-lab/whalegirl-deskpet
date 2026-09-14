@@ -1,6 +1,15 @@
 # dsh-pet-whalegirl
 
-给 [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) 的桌宠插件 [`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet) 用的一只鲸鱼娘。
+一只鲸鱼娘桌宠，同一个角色的两个平台版本：
+
+| 版本 | 给谁用 | 在哪 | 怎么装 |
+|---|---|---|---|
+| **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) + [`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet) | 仓库根目录（`pet/` + `install.mjs`） | 双击 `install.cmd` → 重启 dsh |
+| **Claude 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) | [`claude/`](claude/) | 托盘菜单导入 `whalegirl.petpack` |
+
+**下面整份文档讲的是 dsh 版**；Claude 版的说明在 [`claude/README.md`](claude/README.md)。
+
+两边素材是同一批：待机由分层 PSD 烘焙（呼吸 + 飘发 + 眨眼），其余动作由 AI 视频抽帧配准。行为逻辑也一致——干活时捧着碗一直吃、干完收碗、点她会挥手/比心。
 
 > ⚠️ **这个仓库的主体是素材，而且全部由 AI 生成** —— 立绘经 [see-through](https://github.com/ModelsLab/see-through) 分层，动作由豆包图生视频抽帧。拿去做别的事情之前，先确认所用平台的服务条款：不同平台对生成内容的商用和再分发规定不一样。插件代码本身是 MIT（见文件末尾）。
 
