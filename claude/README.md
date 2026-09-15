@@ -1,6 +1,8 @@
 # Claude 版（PetPet 桌宠）
 
-同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。
+![鲸鱼娘桌宠](../docs/preview/hero.png)
+
+同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。她跟着你干活：你发消息她捧着碗吃（10% 的轮次换成端中碗拿筷子吃），这一轮干完收碗（10% 双手合十给你祝福），你按 Esc 打断她，她停下手里的事甩你一个屑表情。
 
 > **不想手动折腾？让 AI 装**：把仓库链接和这句话发给你的 AI ——
 > 「照 `claude/README.md` 把鲸鱼娘桌宠装上，直接跑 `node claude/install.mjs`（先 `--dry-run` 看一眼），然后按它最后打印的两步收尾。」
@@ -110,6 +112,8 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 | 你做什么 | 她做什么 |
 |---|---|
 | 发出消息、Claude 干活期间 | 捧着碗一口一口吃（循环），并弹出气泡「白饭真好吃」。**其中 10% 的轮次会换成端出中碗、拿筷子正经吃一顿**（同样循环，直到这轮结束） |
+
+![干活时她就这样吃](../docs/preview/eat.gif)
 | 这一轮结束 | 收碗，然后 55% 双手托腮发呆 / 10% 双手合十给你祝福一下 / 35% 回待机 |
 | **你按 Esc 打断她** | 立刻停下手里的动作，甩你一个屑表情（眨眼 + 半眯眼笑），然后回待机 |
 | 什么都不做 | 老实待机——长发和尾巴轻轻晃，偶尔眨眼 |
