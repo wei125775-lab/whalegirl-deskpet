@@ -8,7 +8,8 @@
 
 ## 装
 
-1. **给 viewer 打个补丁**（这一步决定你能不能得到和我们一样的效果）：
+1. **先把 PetPet 装好**：[petpet-playbook](https://github.com/stshourenxy-dev/petpet-playbook)——怎么装、怎么跑（包括绿色版怎么打包）看它自己的 README。
+2. **给 viewer 打上我们的补丁**（这一步决定你能不能得到和我们一样的效果）：
 
    ```bash
    git clone --branch v1.3.0 https://github.com/stshourenxy-dev/petpet-playbook.git
@@ -17,15 +18,12 @@
    cd viewer && npm install && npm run build
    ```
 
-   绿色版应用还要把 `viewer/dist/` 整个覆盖进 `resources/app/dist/`（覆盖前删掉旧目录，里面的文件名带 hash）。
+   打包成绿色版的话，把 `viewer/dist/` 整个覆盖进 `resources/app/dist/`（覆盖前删掉旧目录，里面的文件名带 hash）。只是开发模式跑（`npm run dev`）就不用管这步。
 
    补丁是对 **petpet-playbook v1.3.0** 生成的（187 行、4 个文件，`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`），给它加了四件事：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`（打断）、`loop: false` 的动作一律按一次性处理。每处都有注释说明意图，上游版本更新了也能照着手工合并。
 
    **不打补丁也能跑**，只是那几个字段会被忽略：永远吃普通的小口饭、点她只会挥手、被打断只是停下（没有屑表情）——不会报错，也不会卡住。
-
-2. 装好 PetPet（[petpet-playbook](https://github.com/stshourenxy-dev/petpet-playbook)）并启动
-3. 托盘菜单 → **导入宠物包** → 选 `whalegirl.petpack`
-4. 完事。宠物会装到 `~/.petpet/pets/whalegirl/`
+3. 托盘菜单 → **导入宠物包** → 选 `whalegirl.petpack`。装到 `~/.petpet/pets/whalegirl/`
 
 `whalegirl.petpack` 就是个 zip：顶层一个 `whalegirl/` 目录，里面是 `pet.json` + 10 张精灵表。导入器会自动在单层子目录里找 `pet.json`，也支持你手动解压后选目录导入。如果你已经装过一只同 id 的宠物，导入会覆盖它。
 
@@ -60,6 +58,8 @@
 | `SessionStart` | 开 Claude 时把 PetPet 和打断检测器拉起来（没在跑才拉） |
 | `UserPromptSubmit` | 你按下回车 → 写 `working` → 她开始吃 |
 | `Stop` | 一轮结束 → 写 `idle` → 她收碗 |
+
+**如果你不是用绿色版 exe 跑的**（比如 `npm run dev`）：把 `SessionStart` 那行去掉，改成开机后手动跑一次 `node ~/.claude/hooks/interrupt-watch.mjs` 就行——打断检测和吃饭这两件事都不依赖它。
 
 状态写进 `~/.petpet/state.json`，PetPet 每秒轮询那个文件。**顺带**：状态文件超过 30 分钟没更新会被当成 idle，防止 Claude 被强杀之后桌宠卡在"一直吃"。
 
