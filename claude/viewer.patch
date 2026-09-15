@@ -1,0 +1,366 @@
+# 鲸鱼娘桌宠对 petpet-playbook viewer 的改动
+#
+# 基线：petpet-playbook v1.3.0（= 提交 5f8ac07，2026-08-12）
+# 用法：在 petpet-playbook 仓库根目录执行
+#     git apply claude/viewer.patch        # 或 patch -p1 < claude/viewer.patch
+#   然后重建：cd viewer && npm install && npm run build
+#   （绿色版应用还要把 dist/ 覆盖进 resources/app/dist/）
+#
+# 改了四件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
+# ③ 外部状态增加 interrupted，按 reactions.interrupted 播反应动作
+# ④ loop:false 的动作一律按一次性处理（播完回待机，不再靠手写名单）
+# 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
+
+--- a/viewer/main.js
++++ b/viewer/main.js
+@@ -87,7 +87,9 @@
+     transparent: true,
+     frame: false,
+     alwaysOnTop: true,
+-    resizable: false,
++    resizable: true,   // 必须 true 才能 setSize——Windows 上 resizable:false 会让尺寸变更被忽略，
++                       // 结果是窗口永远 320×320、而渲染层按算出来的新尺寸摆角色，缩放后就错位
++                       // （表现为气泡相对角色跑偏）。无边框窗口用户也拖不到边框，开着不影响。
+     hasShadow: false,
+     skipTaskbar: false,
+     webPreferences: {
+@@ -100,6 +102,15 @@
+   })
+ 
+   mainWindow.setAlwaysOnTop(true, 'screen-saver')
++  // 渲染层的 console 转发到主进程日志：Windows 上没有 devtools 终端，不转发的话
++  // 渲染层出问题只能靠猜（Electron 新版把签名从 (e, level, msg) 改成了对象）
++  mainWindow.webContents.on('console-message', (...args) => {
++    const first = args[0]
++    const msg = (first && typeof first === 'object' && first.message)
++      ? first.message
++      : args.find(x => typeof x === 'string' && x !== 'log' && x !== 'info')
++    if (msg) console.log('[渲染] ' + msg)
++  })
+   // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
+   if (process.platform === 'darwin') {
+     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+@@ -394,6 +405,11 @@
+ ipcMain.on('view:setSize', (_evt, w, h) => {
+   if (!mainWindow || mainWindow.isDestroyed()) return
+   mainWindow.setSize(Math.max(60, Math.round(w)), Math.max(60, Math.round(h)))
++  // 只在没生效时吭声，方便以后排查（这个窗口有过 resizable 导致 setSize 被吃掉的先例）
++  const [aw, ah] = mainWindow.getSize()
++  if (aw !== Math.round(w) || ah !== Math.round(h)) {
++    console.log(`[PetPet] setSize 未生效：请求 ${w}x${h}，实际 ${aw}x${ah}`)
++  }
+ })
+ 
+ // 窗口移动（拖拽宠物）
+@@ -619,12 +635,52 @@
+   saveReminders()  // P0-5: 重复提醒推进/一次性删除都要落盘
+ }
+ 
++// ---------- 外部状态（Claude Code 在不在干活）----------
++// hook 脚本往这个文件写 {"state":"working"|"idle"}。用下面已有的每秒 tick 轮询 mtime，
++// 而不是 fs.watch——Windows 上盯单个文件时，写入方一 rename 覆盖句柄就失效，watcher
++// 会静默死亡且不报错。复用 tick 还天然带 1 秒 debounce，避免一次写入触发多次。
++const STATE_FILE = path.join(app.getPath('home'), '.petpet', 'state.json')
++const STATE_STALE_MS = 30 * 60 * 1000   // 太久没更新说明 Claude 那边断了，别让桌宠一直吃
++// 外部状态信号的白名单：hook 写什么就往渲染层透传什么。
++// 原先只认 'working'、其余一律当 idle——于是 'interrupted'（用户按 Esc 打断，
++// 由 interrupt-watch.mjs 写出）被吞掉，她打完断还在端着碗吃。认不出来的值仍按 idle。
++const EXTERNAL_STATES = new Set(['working', 'interrupted'])
++let lastStateMtime = 0
++let lastStateSent = ''
++
++function pollExternalState() {
++  let st
++  try {
++    st = fs.statSync(STATE_FILE)
++  } catch (e) {
++    return // hook 还没写过，正常
++  }
++  let state
++  if (st.mtimeMs !== lastStateMtime) {
++    lastStateMtime = st.mtimeMs
++    state = 'idle'
++    try {
++      const obj = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'))
++      if (obj && typeof obj.state === 'string' && EXTERNAL_STATES.has(obj.state)) state = obj.state
++    } catch (e) { /* 写了一半的撕裂读，按 idle */ }
++  } else {
++    state = lastStateSent || 'idle'
++  }
++  if (Date.now() - st.mtimeMs > STATE_STALE_MS) state = 'idle'
++  if (state !== lastStateSent) {
++    lastStateSent = state
++    console.log('[PetPet] 外部状态 → ' + state)
++    send('pet:state', state)
++  }
++}
++
+ // 每秒检查（桌宠常驻，开销可忽略；避免超长 setTimeout 超 2^31-1ms 溢出问题）
+ setInterval(() => {
+   const now = Date.now()
+   for (const [id, r] of reminders) {
+     if (r.at <= now) fireReminder(id)
+   }
++  pollExternalState()
+ }, 1000)
+ 
+ // ---------- 生命周期 ----------
+
+--- a/viewer/src/main.ts
++++ b/viewer/src/main.ts
+@@ -4,7 +4,8 @@
+ import 'pixi.js/unsafe-eval'
+ import * as PIXI from 'pixi.js'
+ import { parseReminder } from './reminder'
+-import { shouldPlay } from './state-priority'
++import { shouldPlay, isOneshot } from './state-priority'
++import type { ActionSource } from './state-priority'
+ import { effectiveWeight } from './temperament' // V2-A: 气质调制器（2026-08-09）
+ 
+ // ================= 类型 =================
+@@ -20,6 +21,7 @@
+   frameHeight?: number
+   scale?: number
+   transitions?: Record<string, number>
++  variants?: { action: string; weight: number; putaway?: string }[] // 本地扩展：外部信号（干活）时按权重换成别的动作，见 pickWorkAction；putaway 指定这碗用哪条收碗动作
+   label?: string // v3：菜单显示名（优先于内置映射）
+   diary?: { mood: string; text: string } // v3：动作→日记心情文案（优先于内置映射）
+ }
+@@ -33,6 +35,7 @@
+   cellWidth: number
+   cellHeight: number
+   error?: string
++  reactions?: Record<string, string> // 本地扩展：外部状态 → 反应动作（如 interrupted → smug）
+   actions: Record<string, PetActionSpec>
+   // V2-A: 身份+气质（2026-08-09，可选，缺省=中性，兼容旧包）
+   identity?: {
+@@ -70,6 +73,7 @@
+       openDiary: (petId: string) => void
+       onOpenReminder: (cb: () => void) => void
+       onVisibility: (cb: (visible: boolean) => void) => void  // P2-5: 隐藏时暂停动画
++      onPetState: (cb: (state: string) => void) => void  // 外部状态信号（Claude 在干活 → 循环吃饭）
+       showContextMenu: (x: number, y: number) => Promise<void>
+       listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
+       onPetSwitch: (cb: (id: string) => void) => void
+@@ -189,12 +193,29 @@
+   // 功能入口：托盘爪印（红苕日记/提醒/换肤/动作）+ 右键菜单（触控板双指/辅助点按用户）
+   let downPos = { x: 0, y: 0 }
+   let lastPointerUp = 0
++  // 连击计数：短窗内累计，触发比心后清零。不用 dblclick——那个已经绑给 resetZoom 了。
++  let clickStreak = 0
++  let lastClickTs = 0
++  const STREAK_WINDOW = 600
++  const HEART_AFTER = 4
++  const HEART_CHANCE = 0.45
+   app.canvas.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY } })
+   app.canvas.addEventListener('pointerup', (e) => {
+     lastPointerUp = Date.now()
+     if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
+     const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
+-    if (dist < 6) showBubbleText() // 单击 = 互动气泡
++    if (dist >= 6) return // 拖拽移动窗口，不是点击
++    showBubbleText() // 单击 = 互动气泡
++    // 点击反应：默认挥手，连点多次后按概率改比心
++    const now = Date.now()
++    clickStreak = now - lastClickTs < STREAK_WINDOW ? clickStreak + 1 : 1
++    lastClickTs = now
++    const wantHeart = clickStreak >= HEART_AFTER && Math.random() < HEART_CHANCE
++    if (wantHeart) clickStreak = 0
++    const name = wantHeart ? 'heart' : pickVariant('wave')
++    // 宠物包没这个动作、或精灵表还在后台补（loadPet 里是 Promise.all 并行加载）时，
++    // requestAction 会静默丢弃——上面气泡已经弹过了，不会毫无反馈
++    if (textures[name]) requestAction(name, 'click')
+   })
+ 
+   // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
+@@ -356,13 +377,13 @@
+ // - menu/init：用户主动/初始加载 → 直接执行
+ // - reminder：提醒必须显示 → 直接执行
+ // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
+-function requestAction(name: string, source: 'menu' | 'reminder' | 'random' | 'init' | 'transition' = 'menu') {
++function requestAction(name: string, source: ActionSource = 'menu') {
+   if (!pet || !textures[name] || textures[name].length === 0) return
+   if (!shouldPlay({ name, source }, currentAction)) return
+   playAction(name, source)
+ }
+ 
+-function playAction(name: string, source: 'menu' | 'reminder' | 'random' | 'init' | 'transition' = 'menu') {
++function playAction(name: string, source: ActionSource = 'menu') {
+   if (!pet || !textures[name] || textures[name].length === 0) return
+   // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
+   if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
+@@ -398,9 +419,13 @@
+   currentAction = name
+   applyScale()
+   sprite.play()
+-  // 行为链调度：仅自动行为源（random/transition）挂转移定时器——
+-  // 用户手动/提醒进入的动作不设转移（state-priority 设计意图：手动切换不被自动打断）
+-  if (source === 'random' || source === 'transition') scheduleTransition(name)
++  // 行为链调度：自动行为源（random/transition）和一次性动作（ONESHOT_ACTIONS：
++  // wave/heart/putaway）都挂转移定时器——后者必须回 idle，否则 loop:false 会定格在末帧、
++  // loop:true 会永远循环下去。用户手动/提醒进入的循环动作不设转移（手动切换不被自动打断）。
++  // pet.json 里 loop:false 的动作一律按一次性处理（不再只认手写名单）——
++  // 否则新增的一次性动作（如 eat_mid_putaway）播完会定格在末帧。
++  if (source === 'random' || source === 'transition' || isOneshot(name)
++      || pet?.actions?.[name]?.loop === false) scheduleTransition(name)
+ }
+ 
+ // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
+@@ -432,6 +457,7 @@
+   curWinY = newY
+   curWinW = newW
+   curWinH = newH
++  positionBubble()   // 缩放后角色大小变了，气泡要重新贴回头顶（否则相对位置会错开）
+ }
+ 
+ function applyZoom(factor: number) {
+@@ -454,14 +480,25 @@
+ }
+ 
+ // ================= 气泡 =================
++// 气泡要贴在**角色头顶**，不能钉死在窗口顶部：角色是画在 canvas 上、尺寸随缩放变，
++// 而气泡是 DOM 绝对定位。固定 top:8px 的话，缩放后角色变大变小，两者的相对位置就错开了
++// （表现为"缩放后气泡跑到别的地方"）。
++function positionBubble() {
++  const bubble = document.getElementById('bubble')
++  if (!bubble || bubble.classList.contains('hidden')) return
++  const bh = bubble.offsetHeight          // 触发一次重排，只为拿高度，点击时才走
++  const headY = sprite ? sprite.y - sprite.height / 2 : 0
++  bubble.style.top = Math.max(2, Math.round(headY - bh - 6)) + 'px'
++}
++
+ function showBubbleText(text?: string) {
+   const bubble = document.getElementById('bubble')!
+   const pool = bubblePool()
+   bubble.textContent = text || pool[Math.floor(Math.random() * pool.length)]
+   bubble.classList.remove('hidden')
+   bubble.style.left = '50%'
+-  bubble.style.top = '8px'
+   bubble.style.transform = 'translateX(-50%)'
++  positionBubble()
+ 
+   if (bubbleTimer) clearTimeout(bubbleTimer)
+   bubbleTimer = setTimeout(() => {
+@@ -590,11 +627,71 @@
+       app.ticker.stop()
+     }
+   })
++  // 外部状态信号（Claude Code 的 hook 写状态文件 → 主进程轮询 → 这里）：
++  // 干活时循环吃饭，干完了收碗回待机。走 external 源——它不挂转移定时器（见 playAction），
++  // 所以吃饭会一直循环下去；结束信号来了才由 putaway（一次性动作）接回待机。
++  window.petAPI.onPetState((state) => {
++    console.log(`[状态] 收到 ${state}，当前动作 ${currentAction}，eat 纹理${textures['eat'] ? '已就绪' : '未就绪'}`)
++    if (state === 'working') {
++      // 只在"从待机进入干活"时掷一次骰子（working 信号每次发消息都会来一遍，
++      // 每次都掷的话一轮对话里会被掷好几次，10% 就不止 10% 了）
++      const alreadyEating = currentAction === 'eat' || currentAction === workAction
++      if (!alreadyEating) workAction = pickVariant('eat')
++      // 已经在吃同一份就别重来：重放会把动画拽回第一帧，气泡也会白闪一下
++      if (textures[workAction] && currentAction !== workAction) {
++        requestAction(workAction, 'external')
++        showBubbleText('白饭真好吃')
++      }
++    } else if (state === 'interrupted') {
++      // 用户按 Esc 打断了这一轮（`interrupt-watch.mjs` 从 transcript 里读出来写进状态文件；
++      // 官方没有任何 hook 在打断时触发，Stop 明确排除）。不管当时在做什么都要收住——
++      // 尤其是"干活期间端着碗吃"那种循环，不收的话她会一直吃下去。
++      // 反应动作在 pet.json 的 reactions.interrupted 里配；没配就只回待机。
++      const react = pet?.reactions?.['interrupted']
++      requestAction(react && textures[react] ? react : 'idle', 'interrupted')
++    } else if (state === 'idle' && (currentAction === 'eat' || currentAction === workAction)) {
++      requestAction(pickPutawayAction(workAction), 'click')
++    }
++  })
+ }
+ 
+ // ================= 随机行为 =================
+ // P0：随机触发经 requestAction('random') 仲裁——只在待机时触发（守卫已在 shouldPlay），
+ // 且回 idle 带守卫：仅当“当前仍是本次随机动作”时才回（修复：用户/提醒打断后不再被强制拉回 idle）
++
++// 按权重把基础动作换成别的动作：pet.json 的 `actions.<基础动作>.variants`。
++// 鲸鱼娘配了两处——干活时 10% 把 eat 换成 eat_mid（中口吃）、点她时 8% 把 wave 换成 smug（屑表情）。
++// 权重按百分比理解：变体权重之和就是"换掉"的概率，剩下的归基础动作；没配 variants 时永远返回基础动作，
++// 行为与没有这个扩展时完全一致。
++function pickVariant(base: string): string {
++  const variants = pet?.actions?.[base]?.variants
++  if (!Array.isArray(variants) || variants.length === 0) return base
++  const pool = variants.filter(v => v && typeof v.action === 'string' && (v.weight ?? 0) > 0 && textures[v.action])
++  const total = pool.reduce((s, v) => s + v.weight, 0)
++  if (total <= 0) return base
++  let r = Math.random() * 100
++  for (const v of pool) {
++    r -= v.weight
++    if (r < 0) return v.action
++  }
++  return base
++}
++
++// 干活时吃哪碗饭：默认 eat，可在 pet.json 里换成中口吃。工作期间要用这个值判断该不该收碗，
++// 所以单独存一份。
++let workAction = 'eat'
++
++// 收碗动作：默认 'putaway'（小口吃那条）。变体动作可以在 variants 里用 putaway 指定自己那条——
++// 中口吃放下的是中碗，拿小口吃的收碗动作接会跳（实测接缝 23.46，用自己那条只有 10.75）。
++function pickPutawayAction(action: string): string {
++  const variants = pet?.actions?.['eat']?.variants
++  if (Array.isArray(variants)) {
++    for (const v of variants) {
++      if (v && v.action === action && typeof v.putaway === 'string' && textures[v.putaway]) return v.putaway
++    }
++  }
++  return 'putaway'
++}
+ 
+ // 统一行为链调度（替代原内联 4s 补丁）：
+ // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
+
+--- a/viewer/src/state-priority.ts
++++ b/viewer/src/state-priority.ts
+@@ -3,7 +3,7 @@
+ // 原则：低优先级请求不打断高优先级播放；用户主动操作（菜单）永远最高；提醒必须显示
+ // 注意：红苕 8 动作全为循环动画，ONESHOT 集合当前为空，为未来一次性动作预留
+ 
+-export type ActionSource = 'menu' | 'reminder' | 'random' | 'auto' | 'init' | 'transition'
++export type ActionSource = 'menu' | 'reminder' | 'random' | 'auto' | 'init' | 'transition' | 'click' | 'external' | 'interrupted'
+ 
+ // 打断价值排序：数字越大越优先
+ // 提醒(7) > 拉粑粑(5) > 撒娇/伸懒腰(4) > 奔跑/露肚躺(3) > 嗅闻(2) > 待机(1) > 睡觉(0)
+@@ -21,9 +21,10 @@
+   remind: 7,
+ }
+ 
+-// 一次性动作（播完自动回 idle）：当前红苕 8 动作全为循环动画，
+-// 此集合为未来一次性动作（点击反应/喂食反应）预留，加入即由播放层播完回 idle
+-export const ONESHOT_ACTIONS = new Set<string>([])
++// 一次性动作（播完自动回 idle）。播放层在 playAction 里给这些动作挂转移定时器，
++// 复用 scheduleTransition（有 transitions 按链走，没有就回 idle）。
++// wave/heart 是点击反应，putaway 是"思考结束收碗"——都不该永久循环。
++export const ONESHOT_ACTIONS = new Set<string>(['wave', 'heart', 'putaway'])
+ 
+ export function priorityOf(action: string): number {
+   return ACTION_PRIORITY[action] ?? 1
+@@ -43,9 +44,15 @@
+ // - random：仅在待机时允许（显式化现有守卫：随机行为不打断任何动作）
+ // - transition：行为链的自然延续（作者在 pet.json 显式定义的转移链，见 docs/11 §2.1）
+ //   ——仅在随机进入的动作播完后触发，用户手动切换的动作不设转移定时器，故不会被打断
++// - click：用户点击宠物（挥手/比心）→ 永远允许，和 menu 同级
++// - external：外部状态信号（Claude 在干活 → 循环吃饭）→ 永远允许
+ // - auto：低优先级不打断高优先级（同优先级不打断，避免抖动）
+ export function shouldPlay(req: ActionRequest, currentAction: string): boolean {
+   if (req.source === 'menu' || req.source === 'reminder' || req.source === 'init') return true
++  // click/external 必须走硬路径，不能落到末尾的优先级比较：未注册动作的 priorityOf
++  // 默认 1、和 idle 相等，比较是严格大于，待机状态下点击会被直接拒掉（1 > 1 === false）。
++  // interrupted 同理：用户按 Esc 打断了这一轮，必须能立刻打断"端着碗吃"那个循环。
++  if (req.source === 'click' || req.source === 'external' || req.source === 'interrupted') return true
+   if (req.source === 'random') return currentAction === 'idle'
+   if (req.source === 'transition') return true
+   return priorityOf(req.name) > priorityOf(currentAction)
+
+--- a/viewer/preload.cjs
++++ b/viewer/preload.cjs
+@@ -24,4 +24,5 @@
+   openDiary: (petId) => ipcRenderer.send('diary:open', petId),
+   onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
+   onVisibility: (cb) => ipcRenderer.on('pet:visibility', (_e, visible) => cb(visible)),  // P2-5: 隐藏时暂停动画
++  onPetState: (cb) => ipcRenderer.on('pet:state', (_e, state) => cb(state)),  // 外部状态信号（Claude 在干活 → 循环吃饭）
+ })
