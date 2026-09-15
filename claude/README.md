@@ -8,7 +8,9 @@
 
 ## 装
 
-1. **先把 PetPet 装好**：[petpet-playbook](https://github.com/stshourenxy-dev/petpet-playbook)——怎么装、怎么跑（包括绿色版怎么打包）看它自己的 README。
+1. **先把 PetPet 装好**：[petpet-playbook](https://github.com/stshourenxy-dev/petpet-playbook)——它的 [Releases](https://github.com/stshourenxy-dev/petpet-playbook/releases) 有预编译版（`PetPet.<版本>.exe` 便携版 / `PetPet.Setup.<版本>.exe` 安装版 / macOS 的 `.dmg`），装完就能跑。
+
+   **但如果你想用下面这套行为，必须走源码**：预编译版把应用代码打进了 `app.asar`，外面改不动；而且我们的补丁是针对**源码树**的。所以想得到完整效果，请照着第 2 步从源码重建（或只把重建出的 `dist/` 塞进你自己那份应用里——如果你手上是未打包的目录版）。
 2. **给 viewer 打上我们的补丁**（这一步决定你能不能得到和我们一样的效果）：
 
    ```bash
