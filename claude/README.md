@@ -2,32 +2,55 @@
 
 同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。
 
+> **不想手动折腾？让 AI 装**：把仓库链接和这句话发给你的 AI ——
+> 「照 `claude/README.md` 把鲸鱼娘桌宠装上，直接跑 `node claude/install.mjs`（先 `--dry-run` 看一眼），然后按它最后打印的两步收尾。」
+> 脚本是幂等的，重复跑不会出问题。
+
 跟仓库根目录那套 dsh 版的区别：这是**精灵表 + pet.json v3** 的格式，走 PetPet 框架；dsh 那套是 **frames2d + manifest v2**，走 `@linxin666/dsh-pet` 插件。素材是同一批，动作逻辑也一样，只是打包格式不同。
 
 ---
 
 ## 装
 
-1. **先把 PetPet 装好**：[petpet-playbook](https://github.com/stshourenxy-dev/petpet-playbook)——它的 [Releases](https://github.com/stshourenxy-dev/petpet-playbook/releases) 有预编译版（`PetPet.<版本>.exe` 便携版 / `PetPet.Setup.<版本>.exe` 安装版 / macOS 的 `.dmg`），装完就能跑。
+一条命令（Windows 上也可以直接双击 `install.cmd`）：
 
-   **但如果你想用下面这套行为，必须走源码**：预编译版把应用代码打进了 `app.asar`，外面改不动；而且我们的补丁是针对**源码树**的。所以想得到完整效果，请照着第 2 步从源码重建（或只把重建出的 `dist/` 塞进你自己那份应用里——如果你手上是未打包的目录版）。
-2. **给 viewer 打上我们的补丁**（这一步决定你能不能得到和我们一样的效果）：
+```bash
+node install.mjs             # 装
+node install.mjs --dry-run   # 先看它会改什么，什么都不动
+```
 
-   ```bash
+它依次做完这四件事，**幂等**，重复跑没有副作用：
+
+1. 找到（本机找不到就 clone）petpet-playbook 源码
+2. 把 `viewer.patch` 打上去（内置 diff 应用器，不强依赖 git，能容忍行尾 CRLF/LF 差异）
+3. 在 viewer 里 `npm install && npm run build`
+4. 三个 hook 放进 `~/.claude/hooks/`、**合并**进 `~/.claude/settings.json`（先备份、只加不改、不覆盖你原有配置）；再把 `whalegirl.petpack` 解到 `~/.petpet/pets/whalegirl/`
+
+常用参数：`--viewer <源码路径>`、`--pet-exe <PetPet.exe 路径>`（写进 SessionStart 钩子，开 Claude 自动拉起她）、`--no-build`、`--force`。
+
+跑完还剩两步（脚本结尾会打印）：
+
+- **让它跑起来**：`cd <源码>/viewer && npm run dev`（图省事），或者把 `viewer/dist/` 覆盖进你那份 PetPet 应用的 `resources/app/dist/`（先删旧目录，文件名带 hash）
+- **重启 Claude Code**（让 SessionStart 钩子生效）
+
+### 它到底改了什么 / 不打补丁会怎样
+
+- **补丁**是对 petpet-playbook **v1.3.0** 生成的（187 行、4 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`），加了四件事：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`（打断）、`loop: false` 的动作一律按一次性处理。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按文件里每处的注释手工合并即可。
+- **`whalegirl.petpack` 就是个 zip**：顶层 `whalegirl/` 目录，里面 `pet.json` + 10 张精灵表；也能用 PetPet 托盘菜单「导入宠物包」手动装。
+- **不打补丁也能跑**：那几个字段会被忽略——永远吃普通的小口饭、点她只会挥手、被打断只是停下（没有屑表情）。不会报错、不会卡住。
+
+### 手动装（不想跑脚本，或脚本卡住了）
+
+1. 装好 PetPet（[petpet-playbook](https://github.com/stshourenxy-dev/petpet-playbook)）。它的 [Releases](https://github.com/stshourenxy-dev/petpet-playbook/releases) 有预编译版（`PetPet.<版本>.exe` 便携版 / `PetPet.Setup.<版本>.exe` 安装版 / macOS `.dmg`）——**但预编译版把应用代码打进了 `app.asar`，外部改不动，所以想要完整效果必须走源码**。
+2. ```bash
    git clone --branch v1.3.0 https://github.com/stshourenxy-dev/petpet-playbook.git
    cd petpet-playbook
    git apply /path/to/claude/viewer.patch        # 或 patch -p1 < claude/viewer.patch
    cd viewer && npm install && npm run build
    ```
-
-   打包成绿色版的话，把 `viewer/dist/` 整个覆盖进 `resources/app/dist/`（覆盖前删掉旧目录，里面的文件名带 hash）。只是开发模式跑（`npm run dev`）就不用管这步。
-
-   补丁是对 **petpet-playbook v1.3.0** 生成的（187 行、4 个文件，`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`），给它加了四件事：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`（打断）、`loop: false` 的动作一律按一次性处理。每处都有注释说明意图，上游版本更新了也能照着手工合并。
-
-   **不打补丁也能跑**，只是那几个字段会被忽略：永远吃普通的小口饭、点她只会挥手、被打断只是停下（没有屑表情）——不会报错，也不会卡住。
-3. 托盘菜单 → **导入宠物包** → 选 `whalegirl.petpack`。装到 `~/.petpet/pets/whalegirl/`
-
-`whalegirl.petpack` 就是个 zip：顶层一个 `whalegirl/` 目录，里面是 `pet.json` + 10 张精灵表。导入器会自动在单层子目录里找 `pet.json`，也支持你手动解压后选目录导入。如果你已经装过一只同 id 的宠物，导入会覆盖它。
+3. 绿色版再把 `viewer/dist/` 整个覆盖进 `resources/app/dist/`（先删旧的）。
+4. 托盘菜单 → **导入宠物包** → 选 `whalegirl.petpack`。
+5. 三个 hook 按下节的手动配置来挂。
 
 ---
 
