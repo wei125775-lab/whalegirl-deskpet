@@ -18,8 +18,8 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -67,20 +67,66 @@ function findViewer() {
   return undefined
 }
 
-function cloneViewer() {
+/** 本机没有源码时：优先 git clone；没装 git 就退化成直接下 GitHub 的 tar.gz（codeload 可直连） */
+async function obtainViewer() {
   const dest = join(homedir(), 'petpet-playbook')
-  say(`   本地没有 petpet-playbook 源码，尝试克隆到 ${dest}（tag ${UPSTREAM_TAG}）`)
+  const hasGit = (() => {
+    try { return spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0 } catch { return false }
+  })()
+  const tarball = `https://codeload.github.com/stshourenxy-dev/petpet-playbook/tar.gz/refs/tags/${UPSTREAM_TAG}`
+
   if (DRY) {
-    say('   [dry-run] git clone --branch ' + UPSTREAM_TAG + ' ' + UPSTREAM + ' ' + dest)
+    say(`   [dry-run] ${hasGit ? 'git clone --branch ' + UPSTREAM_TAG + ' ' + UPSTREAM : '下载 ' + tarball} → ${dest}`)
     return dest
   }
-  const r = spawnSync('git', ['clone', '--branch', UPSTREAM_TAG, '--depth', '1', UPSTREAM, dest], { stdio: 'inherit' })
-  if (r.status !== 0) {
-    warn('克隆失败。请手动 clone 后重跑，或加 --viewer <路径> 指到已有的源码目录：')
-    warn(`    git clone --branch ${UPSTREAM_TAG} ${UPSTREAM}`)
+
+  if (hasGit) {
+    say(`   本地没有源码，克隆到 ${dest}（tag ${UPSTREAM_TAG}）`)
+    const r = spawnSync('git', ['clone', '--branch', UPSTREAM_TAG, '--depth', '1', UPSTREAM, dest], { stdio: 'inherit' })
+    if (r.status === 0 && existsSync(join(dest, 'viewer', 'src', 'main.ts'))) return dest
+    warn('git clone 没成功，改用直接下载压缩包')
+  } else {
+    say('   本机没有 git —— 直接下 GitHub 的压缩包（不需要 git）')
+  }
+
+  if (typeof fetch !== 'function') {
+    warn('这个 node 版本没有 fetch（需要 18+），没法自动下载。请手动来：')
+    warn(`    打开 ${tarball} 解压，然后用 --viewer <解压出来的目录> 重跑`)
     return undefined
   }
-  return dest
+  try {
+    const res = await fetch(tarball)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const buf = Buffer.from(await res.arrayBuffer())
+    const tgz = join(tmpdir(), `petpet-playbook-${UPSTREAM_TAG}-${Date.now()}.tar.gz`)
+    writeFileSync(tgz, buf)
+    rmSync(dest, { recursive: true, force: true })
+    mkdirSync(dest, { recursive: true })
+    // 只解我们要的 viewer/ 子树：上游包里有中文文件名的 docs，某些环境下的 bsdtar 会为它们
+    // 刷一屏 "Invalid empty pathname"（无害但吓人，而且会让退出码非 0）。所以
+    //   ① 只点 viewer 这一支 ② stderr 静音 ③ 判成功看"关键文件在不在"，不看退出码
+    // 另外用文件名 + cwd 的组合：PATH 上的 GNU tar 会把 "D:/..." 当成远程主机（Cannot connect to D:）
+    const topDir = 'petpet-playbook-' + UPSTREAM_TAG.replace(/^v/, '')
+    const bins = process.platform === 'win32' ? ['C:/Windows/System32/tar.exe', 'tar'] : ['tar']
+    const want = join(dest, 'viewer', 'src', 'main.ts')
+    let done = false
+    for (const bin of bins) {
+      try {
+        spawnSync(bin, ['-xzf', basename(tgz), '-C', dest, '--strip-components=1', `${topDir}/viewer`],
+          { cwd: dirname(tgz), stdio: ['ignore', 'ignore', 'ignore'] })
+      } catch { /* 换下一个 tar */ }
+      if (existsSync(want)) { done = true; break }
+    }
+    rmSync(tgz, { force: true })
+    if (!done) throw new Error('解压后没找到 viewer/src/main.ts')
+    ok('源码已下载并解压到 ' + dest)
+    return dest
+  } catch (e) {
+    warn('自动下载失败：' + e.message)
+    warn('请手动下载后重跑，或加 --viewer <路径> 指到已有的源码目录：')
+    warn('     ' + tarball)
+    return undefined
+  }
 }
 
 // ---------------------------------------------------------------- 2. 打补丁
@@ -289,14 +335,14 @@ function installPet() {
 }
 
 // ---------------------------------------------------------------- main
-function main() {
+async function main() {
   say('鲸鱼娘桌宠 · Claude/PetPet 版安装' + (DRY ? '（dry-run，不会改任何东西）' : ''))
   say('  claude 配置目录: ' + CLAUDE_DIR)
   say('  petpet 数据目录: ' + PETPET_DIR)
 
   step('1/4 找 petpet-playbook 源码')
   let root = findViewer()
-  if (!root) root = cloneViewer()
+  if (!root) root = await obtainViewer()
   if (!root) {
     warn('没找到源码，后面的补丁和构建都做不了。')
     warn('（只有宠物包和 hook 能装——但它们需要打过补丁的 viewer 才有完整效果）')
@@ -346,7 +392,7 @@ function main() {
 }
 
 try {
-  main()
+  await main()
 } catch (e) {
   console.error('\n出错了：' + (e && e.message ? e.message : e))
   process.exit(1)
