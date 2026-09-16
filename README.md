@@ -6,6 +6,8 @@
 
 她不是那种只会原地晃两下的桌宠 —— 你发消息她捧着碗一口一口吃，这一轮干完她收碗，偶尔双手合十给你祝福，你按 Esc 打断她，她会停下手里的事甩你一个屑表情，点她会挥手/比心。
 
+**English**: a desktop pet that reacts to your AI coding session. Same character, two builds: **Claude Code** ([PetPet](https://github.com/stshourenxy-dev/petpet-playbook)) and **dsh**. She eats from a bowl while you work, puts it away when the turn ends, and gives you a smug look if you hit Esc to interrupt. On **Windows** you can grab the [green build](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest), unzip it and double-click `启动.cmd`.
+
 ![她在 Claude Code 上干活的样子](docs/preview/scene.png)
 
 *实拍：左边是 Claude Code 正在跑任务，右边就是她——干活期间一直端着碗吃，气泡是她自己弹的。*
