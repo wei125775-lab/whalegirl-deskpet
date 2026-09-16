@@ -30,6 +30,10 @@
 
 ## 装
 
+**最省事：下 [绿色版](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest)** —— Windows x64，解压后双击 `启动.cmd` 就有她。不用装 Node、不用 clone 源码、不用编译。代价是包大（200MB，整个 Electron 运行时都在里面）。
+
+绿色版就是下面「Claude Code 版」预先构建好的成品；想自己构建，或者要用 dsh 版，走这两条：
+
 | 版本 | 给谁用 | 怎么装 |
 |---|---|---|
 | **Claude Code 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 桌宠，跟 Claude Code 联动的那只 | `node claude/install.mjs` → 按它打印的收尾。详见 [`claude/README.md`](claude/README.md) |
