@@ -128,7 +128,7 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 - **`actions.eat.variants`** —— 干活时吃哪碗饭。`[{ "action": "eat_mid", "weight": 10, "putaway": "eat_mid_putaway" }]` 的意思是"10% 换成中口吃"，剩下的 90% 仍是普通的吃；`putaway` 指明这一碗收工后走哪条收碗动作（中碗要放下的是中碗，用小口吃那条收碗会硬跳）。想让中口吃更常见就调大 `weight`，不想要就删掉这个字段（删了就永远只吃小口饭）。**每次从待机进入干活时掷一次骰子**，一轮对话里不会反复重掷。
 
   中口吃用的**不是**素材的完整 30 帧：那 30 帧是一整套"空手站 → 端起碗 → 吃 → 放下碗 → 空手站"，loop 起来会变成每 2.5 秒放一次碗。这里只取 f11~f22 那 12 帧"碗举在脸前、筷子扒饭"，配 pingpong 往返（共 22 格），和小口吃是同一套做法；**收碗也从同一条素材里单独切了 f22~f30 那 9 帧**（放下中碗 + 手收回），生成脚本在 `whalegirl-pet-kit` 的 `tools/build_eat_mid_core.py`。
-- **`putaway.transitions`** —— 收碗之后按权重挑下一个动作（现在是 `{touchface: 60, idle: 40}`）。
+- **`putaway.transitions`**：收碗之后按权重挑下一个动作。普通收碗是 `{touchface: 55, bless: 10, idle: 35}`；中碗收工走的是 `eat_mid_putaway`，它的是 `{touchface: 60, idle: 40}`，不掷祝福。
 
 PetPet 只在启动时读 `pet.json`，改完要重启它。
 
