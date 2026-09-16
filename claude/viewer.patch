@@ -6,9 +6,12 @@
 #   然后重建：cd viewer && npm install && npm run build
 #   （绿色版应用还要把 dist/ 覆盖进 resources/app/dist/）
 #
-# 改了四件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
+# 改了五件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
 # ③ 外部状态增加 interrupted，按 reactions.interrupted 播反应动作
 # ④ loop:false 的动作一律按一次性处理（播完回待机，不再靠手写名单）
+# ⑤ 窗口几何 IPC 加 NaN 守卫：setPosition / setSize / menu.popup 收到坏坐标会在主进程抛
+#    未捕获异常、整个 app 弹框崩掉。注意 Math.round(NaN) 仍是 NaN，光靠 Math.round 挡不住，
+#    必须显式判有限（2026-09-16）
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 --- a/viewer/main.js
@@ -40,19 +43,63 @@
    // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
    if (process.platform === 'darwin') {
      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-@@ -394,6 +405,11 @@
+@@ -231,6 +242,16 @@
+   })
+ }
+ 
++// 窗口几何 IPC 的入口守卫。
++// Electron 的 setPosition/setSize/popup 只吃有限整数，喂进 NaN 会在原生层抛 TypeError，
++// 而 ipcMain 监听器里的异常没人接 = 主进程未捕获异常直接弹框崩掉。
++// 注意 Math.round(NaN) 仍是 NaN，所以光靠 Math.round 挡不住，必须显式判有限。
++function toWinInt(v, min) {
++  const n = Math.round(Number(v))
++  if (!Number.isFinite(n)) return null
++  return min === undefined ? n : Math.max(min, n)
++}
++
+ // 右键菜单：原生 macOS Menu.popup（自动毛玻璃/定位，替代 HTML 自绘）
+ ipcMain.handle('menu:showContext', (_evt, x, y) => {
+   const petName = currentPetName || '宠物'
+@@ -249,7 +270,10 @@
+   template.push({ type: 'separator' })
+   template.push({ label: '↺ 重置大小', click: () => send('view:reset') })
+   const menu = Menu.buildFromTemplate(template)
+-  menu.popup({ x: Math.round(x), y: Math.round(y) })
++  // 坐标坏值时退回默认位置（popup 传 NaN 同样会抛）
++  const px = toWinInt(x)
++  const py = toWinInt(y)
++  menu.popup(px === null || py === null ? {} : { x: px, y: py })
+ })
+ 
+ function toggleWindow() {
+@@ -393,13 +417,24 @@
+ // 窗口尺寸变化（渲染进程请求调整窗口大小）
  ipcMain.on('view:setSize', (_evt, w, h) => {
    if (!mainWindow || mainWindow.isDestroyed()) return
-   mainWindow.setSize(Math.max(60, Math.round(w)), Math.max(60, Math.round(h)))
+-  mainWindow.setSize(Math.max(60, Math.round(w)), Math.max(60, Math.round(h)))
++  const nw = toWinInt(w, 60)
++  const nh = toWinInt(h, 60)
++  if (nw === null || nh === null) return console.warn('[PetPet] view:setSize 收到非法尺寸：', w, h)
++  mainWindow.setSize(nw, nh)
 +  // 只在没生效时吭声，方便以后排查（这个窗口有过 resizable 导致 setSize 被吃掉的先例）
 +  const [aw, ah] = mainWindow.getSize()
-+  if (aw !== Math.round(w) || ah !== Math.round(h)) {
-+    console.log(`[PetPet] setSize 未生效：请求 ${w}x${h}，实际 ${aw}x${ah}`)
++  if (aw !== nw || ah !== nh) {
++    console.log(`[PetPet] setSize 未生效：请求 ${nw}x${nh}，实际 ${aw}x${ah}`)
 +  }
  })
  
  // 窗口移动（拖拽宠物）
-@@ -619,12 +635,52 @@
+ ipcMain.on('view:move', (_evt, x, y) => {
+   if (!mainWindow || mainWindow.isDestroyed()) return
+-  mainWindow.setPosition(Math.round(x), Math.round(y))
++  const nx = toWinInt(x)
++  const ny = toWinInt(y)
++  if (nx === null || ny === null) return console.warn('[PetPet] view:move 收到非法坐标：', x, y)
++  mainWindow.setPosition(nx, ny)
+ })
+ 
+ // 鼠标穿透（借鉴 bitnp：透明区穿透，宠物区交互；forward=true 穿透时仍收 mousemove）
+@@ -619,12 +654,52 @@
    saveReminders()  // P0-5: 重复提醒推进/一次性删除都要落盘
  }
  
@@ -105,7 +152,6 @@
  }, 1000)
  
  // ---------- 生命周期 ----------
-
 --- a/viewer/src/main.ts
 +++ b/viewer/src/main.ts
 @@ -4,7 +4,8 @@
@@ -142,7 +188,43 @@
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -189,12 +193,29 @@
+@@ -130,18 +134,29 @@
+   app.canvas.addEventListener('pointerdown', async (e) => {
+     dragging = true
+     startScreen = { x: e.screenX, y: e.screenY }
+-    winStart = await window.petAPI.getWindowPosition()
++    // 先用本地跟踪的坐标兜底：await 期间若已有 pointermove，就不会拿过期基准算偏移；
++    // 主进程万一返回坏值也留得住有限坐标（NaN 传下去会崩主进程）
++    winStart = { x: curWinX, y: curWinY }
+     app.canvas.setPointerCapture(e.pointerId)
++    try {
++      const p = await window.petAPI.getWindowPosition()
++      if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) winStart = p
++    } catch (err) {
++      console.error('获取窗口位置失败', err)
++    }
+   })
+ 
+   // 拖拽移动窗口（同步本地位置跟踪，供缩放中心计算使用）
+   app.canvas.addEventListener('pointermove', (e) => {
+     if (!dragging) return
+-    const nx = winStart.x + (e.screenX - startScreen.x)
+-    const ny = winStart.y + (e.screenY - startScreen.y)
+-    curWinX = Math.round(nx)
+-    curWinY = Math.round(ny)
+-    window.petAPI.moveWindow(Math.round(nx), Math.round(ny))
++    // 坐标守卫：screenX/Y 缺失、或 getWindowPosition 还没 await 落地时会算出 NaN，
++    // 传到主进程 setPosition 会让原生层抛异常、整个 app 崩掉（2026-09-16）
++    const nx = Math.round(winStart.x + (e.screenX - startScreen.x))
++    const ny = Math.round(winStart.y + (e.screenY - startScreen.y))
++    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return
++    curWinX = nx
++    curWinY = ny
++    window.petAPI.moveWindow(nx, ny)
+   })
+ 
+   app.canvas.addEventListener('pointerup', () => { dragging = false })
+@@ -189,12 +204,29 @@
    // 功能入口：托盘爪印（红苕日记/提醒/换肤/动作）+ 右键菜单（触控板双指/辅助点按用户）
    let downPos = { x: 0, y: 0 }
    let lastPointerUp = 0
@@ -173,7 +255,7 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -356,13 +377,13 @@
+@@ -356,13 +388,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -189,7 +271,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -398,9 +419,13 @@
+@@ -398,9 +430,13 @@
    currentAction = name
    applyScale()
    sprite.play()
@@ -206,15 +288,32 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -432,6 +457,7 @@
-   curWinY = newY
-   curWinW = newW
-   curWinH = newH
+@@ -426,12 +462,18 @@
+ 
+   const newX = Math.round(curWinX + (curWinW - newW) / 2)
+   const newY = Math.round(curWinY + (curWinH - newH) / 2)
+-  window.petAPI.moveWindow(newX, newY)
+-  window.petAPI.setWindowSize(newW, newH)
+-  curWinX = newX
+-  curWinY = newY
+-  curWinW = newW
+-  curWinH = newH
++  // 同上：curWin* 任一被污染成 NaN 就跳过，别把坏值送去主进程
++  if (Number.isFinite(newX) && Number.isFinite(newY)) {
++    window.petAPI.moveWindow(newX, newY)
++    curWinX = newX
++    curWinY = newY
++  }
++  if (Number.isFinite(newW) && Number.isFinite(newH)) {
++    window.petAPI.setWindowSize(newW, newH)
++    curWinW = newW
++    curWinH = newH
++  }
 +  positionBubble()   // 缩放后角色大小变了，气泡要重新贴回头顶（否则相对位置会错开）
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +480,25 @@
+@@ -454,14 +496,25 @@
  }
  
  // ================= 气泡 =================
@@ -241,7 +340,7 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -590,11 +627,71 @@
+@@ -590,12 +643,72 @@
        app.ticker.stop()
      }
    })
@@ -276,7 +375,7 @@
  // ================= 随机行为 =================
  // P0：随机触发经 requestAction('random') 仲裁——只在待机时触发（守卫已在 shouldPlay），
  // 且回 idle 带守卫：仅当“当前仍是本次随机动作”时才回（修复：用户/提醒打断后不再被强制拉回 idle）
-+
+ 
 +// 按权重把基础动作换成别的动作：pet.json 的 `actions.<基础动作>.variants`。
 +// 鲸鱼娘配了两处——干活时 10% 把 eat 换成 eat_mid（中口吃）、点她时 8% 把 wave 换成 smug（屑表情）。
 +// 权重按百分比理解：变体权重之和就是"换掉"的概率，剩下的归基础动作；没配 variants 时永远返回基础动作，
@@ -310,10 +409,10 @@
 +  }
 +  return 'putaway'
 +}
- 
++
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
-
+ // 有 transitions 则按权重转移（transition 源），否则回 idle（init 源）
 --- a/viewer/src/state-priority.ts
 +++ b/viewer/src/state-priority.ts
 @@ -3,7 +3,7 @@
