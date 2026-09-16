@@ -37,8 +37,8 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 
 ### 它到底改了什么 / 不打补丁会怎样
 
-- **补丁**是对 petpet-playbook **v1.3.0** 生成的（4 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`），加了五件事：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`（打断）、`loop: false` 的动作一律按一次性处理、窗口几何 IPC 加 NaN 守卫（`setPosition` / `setSize` / `menu.popup` 收到坏坐标会在主进程抛未捕获异常、整个 app 弹框崩掉）。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按文件里每处的注释手工合并即可。
-- **已经装过旧版补丁的注意**：脚本靠特征串判断补丁打没打过，判定已打就整步跳过，所以重跑 `install.mjs` **不会**把这次新增的守卫补上。要么照补丁里 `toWinInt` 那几处手工改，要么把 `viewer/` 还原到 v1.3.0 再重装。
+- **补丁**是对 petpet-playbook **v1.3.0** 生成的（4 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`），加了七件事：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`（打断）、`loop: false` 的动作一律按一次性处理、窗口几何 IPC 加 NaN 守卫（`setPosition` / `setSize` / `menu.popup` 收到坏坐标会让主进程抛未捕获异常、整个 app 弹框崩掉）、窗口默认 `focusable: false`（点她不再把焦点从终端抢走，提醒面板临时开回来）、`petpet://` 协议补 `corsEnabled`（少了它每个动作都要先失败一次再回退 IPC）。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按文件里每处的注释手工合并即可。
+- **已经装过旧版补丁的注意**：脚本靠特征串判断补丁打没打过，判定已打就整步跳过，所以重跑 `install.mjs` **不会**把后来新增的修复补上。要么照着 `claude/viewer.patch` 里那几处手工改，要么把 `viewer/` 还原到 v1.3.0 再重装。
 - **`whalegirl.petpack` 就是个 zip**：顶层 `whalegirl/` 目录，里面 `pet.json` + 10 张精灵表；也能用 PetPet 托盘菜单「导入宠物包」手动装。
 - **不打补丁也能跑**：那几个字段会被忽略——永远吃普通的小口饭、点她只会挥手、被打断只是停下（没有屑表情），不会报错、不会卡住。**但前面那个几何 IPC 守卫属于稳定性修复**，不打的话拖拽/缩放时一旦算出坏坐标，主进程会直接弹框退出（是上游 v1.3.0 自带的隐患，不是这个宠物包引入的）。
 

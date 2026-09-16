@@ -6,28 +6,46 @@
 #   然后重建：cd viewer && npm install && npm run build
 #   （绿色版应用还要把 dist/ 覆盖进 resources/app/dist/）
 #
-# 改了五件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
+# 改了七件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
 # ③ 外部状态增加 interrupted，按 reactions.interrupted 播反应动作
 # ④ loop:false 的动作一律按一次性处理（播完回待机，不再靠手写名单）
 # ⑤ 窗口几何 IPC 加 NaN 守卫：setPosition / setSize / menu.popup 收到坏坐标会在主进程抛
-#    未捕获异常、整个 app 弹框崩掉。注意 Math.round(NaN) 仍是 NaN，光靠 Math.round 挡不住，
-#    必须显式判有限（2026-09-16）
+#    未捕获异常、整个 app 弹框崩掉。注意 Math.round(NaN) 仍是 NaN，光靠 Math.round 挡不住
+# ⑥ 窗口默认 focusable:false，点她不再把焦点从终端抢走；提醒面板要打字，走
+#    openReminderWithFocus() 临时开回来，面板关掉后由 reminder:panel-closed 复位
+# ⑦ petpet:// 协议补 corsEnabled：少了它，渲染层从 file:// fetch 会被判跨源拦掉，
+#    每个动作都得先失败一次再回退 IPC
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 --- a/viewer/main.js
 +++ b/viewer/main.js
-@@ -87,7 +87,9 @@
+@@ -33,7 +33,9 @@
+ // N-3：注册自定义协议（需在 app ready 前），渲染层用短 URL 流式读资产
+ // petpet://<petId>/<relPath> → 文件系统，零 base64、零主进程内存驻留
+ protocol.registerSchemesAsPrivileged([
+-  { scheme: 'petpet', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
++  // corsEnabled：少了它，渲染层从 file:// 去 fetch petpet:// 会被当成跨源拦掉，
++  // 每个动作都得先失败一次再回退 IPC 加载（2026-09-16 在日志里发现的）
++  { scheme: 'petpet', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }
+ ])
+ 
+ let mainWindow = null
+@@ -87,7 +89,13 @@
      transparent: true,
      frame: false,
      alwaysOnTop: true,
 -    resizable: false,
++    // 默认不可聚焦：无边框桌宠窗口默认可聚焦，点她一下会把焦点从终端抢走，
++    // 而"一边看她一边在 Claude Code 里打字"正是主场景。
++    // 唯一需要键盘的是提醒面板，走 openReminderWithFocus() 临时开回来。
++    focusable: false,
 +    resizable: true,   // 必须 true 才能 setSize——Windows 上 resizable:false 会让尺寸变更被忽略，
 +                       // 结果是窗口永远 320×320、而渲染层按算出来的新尺寸摆角色，缩放后就错位
 +                       // （表现为气泡相对角色跑偏）。无边框窗口用户也拖不到边框，开着不影响。
      hasShadow: false,
      skipTaskbar: false,
      webPreferences: {
-@@ -100,6 +102,15 @@
+@@ -100,6 +108,15 @@
    })
  
    mainWindow.setAlwaysOnTop(true, 'screen-saver')
@@ -43,7 +61,7 @@
    // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
    if (process.platform === 'darwin') {
      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-@@ -231,6 +242,16 @@
+@@ -231,6 +248,16 @@
    })
  }
  
@@ -60,7 +78,7 @@
  // 右键菜单：原生 macOS Menu.popup（自动毛玻璃/定位，替代 HTML 自绘）
  ipcMain.handle('menu:showContext', (_evt, x, y) => {
    const petName = currentPetName || '宠物'
-@@ -249,7 +270,10 @@
+@@ -249,7 +276,10 @@
    template.push({ type: 'separator' })
    template.push({ label: '↺ 重置大小', click: () => send('view:reset') })
    const menu = Menu.buildFromTemplate(template)
@@ -72,7 +90,30 @@
  })
  
  function toggleWindow() {
-@@ -393,13 +417,24 @@
+@@ -270,14 +300,22 @@
+ }
+ 
+ // P0-4: 从托盘/菜单打开提醒面板前，先解除窗口穿透 + 抢焦点（否则面板点不动、键盘输不进去）
++// 2026-09-16：窗口平时是 focusable:false（点她不抢焦点），而面板要打字，所以这里临时开回来；
++// 渲染层关掉面板时发 reminder:panel-closed 复位，避免之后点她又把焦点抢走。
+ function openReminderWithFocus() {
+   if (!mainWindow) return
+   mainWindow.setIgnoreMouseEvents(false)
+   mainWindow.show()
++  mainWindow.setFocusable(true)
+   mainWindow.focus()
+   send('open:reminder')
+ }
+ 
++ipcMain.on('reminder:panel-closed', () => {
++  if (!mainWindow || mainWindow.isDestroyed()) return
++  mainWindow.setFocusable(false)
++})
++
+ // ---------- IPC：宠物资产读取 ----------
+ // 列出 ~/.petpet/pets 下的宠物
+ ipcMain.handle('pet:list', () => {
+@@ -393,13 +431,24 @@
  // 窗口尺寸变化（渲染进程请求调整窗口大小）
  ipcMain.on('view:setSize', (_evt, w, h) => {
    if (!mainWindow || mainWindow.isDestroyed()) return
@@ -99,7 +140,7 @@
  })
  
  // 鼠标穿透（借鉴 bitnp：透明区穿透，宠物区交互；forward=true 穿透时仍收 mousemove）
-@@ -619,12 +654,52 @@
+@@ -619,12 +668,52 @@
    saveReminders()  // P0-5: 重复提醒推进/一次性删除都要落盘
  }
  
@@ -180,15 +221,17 @@
    actions: Record<string, PetActionSpec>
    // V2-A: 身份+气质（2026-08-09，可选，缺省=中性，兼容旧包）
    identity?: {
-@@ -70,6 +73,7 @@
+@@ -69,7 +72,9 @@
+       appendActivity: (entry: { petId: string; mood: string; text: string }) => void
        openDiary: (petId: string) => void
        onOpenReminder: (cb: () => void) => void
++      notifyReminderClosed: () => void
        onVisibility: (cb: (visible: boolean) => void) => void  // P2-5: 隐藏时暂停动画
 +      onPetState: (cb: (state: string) => void) => void  // 外部状态信号（Claude 在干活 → 循环吃饭）
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -130,18 +134,29 @@
+@@ -130,18 +135,29 @@
    app.canvas.addEventListener('pointerdown', async (e) => {
      dragging = true
      startScreen = { x: e.screenX, y: e.screenY }
@@ -224,7 +267,7 @@
    })
  
    app.canvas.addEventListener('pointerup', () => { dragging = false })
-@@ -189,12 +204,29 @@
+@@ -189,12 +205,29 @@
    // 功能入口：托盘爪印（红苕日记/提醒/换肤/动作）+ 右键菜单（触控板双指/辅助点按用户）
    let downPos = { x: 0, y: 0 }
    let lastPointerUp = 0
@@ -255,7 +298,7 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -356,13 +388,13 @@
+@@ -356,13 +389,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -271,7 +314,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -398,9 +430,13 @@
+@@ -398,9 +431,13 @@
    currentAction = name
    applyScale()
    sprite.play()
@@ -288,7 +331,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +462,18 @@
+@@ -426,12 +463,18 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -313,7 +356,7 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +496,25 @@
+@@ -454,14 +497,25 @@
  }
  
  // ================= 气泡 =================
@@ -340,7 +383,15 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -590,12 +643,72 @@
+@@ -515,6 +569,7 @@
+ 
+ function closeReminderPanel() {
+   document.getElementById('reminder-panel')!.classList.add('hidden')
++  window.petAPI.notifyReminderClosed()   // 面板用完，让主进程把"不抢焦点"恢复回去
+ }
+ 
+ async function submitReminder() {
+@@ -590,12 +645,72 @@
        app.ticker.stop()
      }
    })
@@ -454,12 +505,13 @@
    if (req.source === 'random') return currentAction === 'idle'
    if (req.source === 'transition') return true
    return priorityOf(req.name) > priorityOf(currentAction)
-
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
-@@ -24,4 +24,5 @@
+@@ -23,5 +23,7 @@
+   notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
    openDiary: (petId) => ipcRenderer.send('diary:open', petId),
    onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
++  notifyReminderClosed: () => ipcRenderer.send('reminder:panel-closed'),  // 面板关掉 → 主进程恢复"不抢焦点"
    onVisibility: (cb) => ipcRenderer.on('pet:visibility', (_e, visible) => cb(visible)),  // P2-5: 隐藏时暂停动画
 +  onPetState: (cb) => ipcRenderer.on('pet:state', (_e, state) => cb(state)),  // 外部状态信号（Claude 在干活 → 循环吃饭）
  })
