@@ -21,6 +21,22 @@
 #    只在 pointermove 时重算，鼠标没动时结论一直是旧的，窗口就卡在穿透态（实测卡住后连
 #    mousemove 都收不到，怎么移鼠标都点不到她，只能重启）。改成主进程每秒心跳推一次光标
 #    位置让渲染层重算，不再依赖 Electron 的 forward 转发
+# ⑩ 顺手修掉几个上游原有的 bug（与这只宠物无关，是 viewer 自己的）：
+#    - loadReminders() 全项目零调用：重启后提醒不恢复，而 saveReminders 写的是整份内存
+#      Map、不先读回来的话第一次落盘就把存档覆盖成空的，ID 也会从 0 重排去撞存档里的
+#    - 提醒的 at 改用 Number.isFinite 校验（typeof NaN === 'number' 为真，NaN/Infinity
+#      都能混过去，存下来之后 NaN <= now 永远为假、这条提醒再也不会触发）；每日/每周
+#      提醒改成对齐到下一个未来时刻（原来一次只推进一个周期，休眠跨了好几个周期再醒来
+#      会连着触发好几次）
+#    - 日记窗口的垂直钳制算了却被丢掉（创建时又写成 Math.max(0, pos[1])），宠物在屏幕
+#      下半部时日记窗口会越过工作区
+#    - 窗口位置持久化挂的 'moved' 在 Windows 上不触发（拖拽走的是程序化 setPosition，
+#      不进系统移动循环，ui-state.json 从来没生成过）；改在 view:move 里 debounce 保存，
+#      并在启动时校验存档坐标还落在某个显示器里（拔掉外接屏后她不会跑到屏幕外去）
+#    - pet:setIgnoreMouse 的 ignore 没规范成布尔（非布尔值喂给原生层会抛 conversion
+#      failure，主进程未捕获异常弹框；同一行的 forward 一直是 !!forward）
+#    - pet:list 与 pet:load 口径不一致：名字带空格/中文/点号的目录会被列出来，
+#      然后加载失败弹错误卡片
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 --- a/viewer/main.js
@@ -36,7 +52,48 @@
  ])
  
  let mainWindow = null
-@@ -87,7 +89,13 @@
+@@ -75,19 +77,51 @@
+   }
+ }
+ 
++// 拖拽落地后再存位置。位置持久化原先只挂在窗口的 'moved' 事件上，可拖拽走的是渲染层
++// pointermove → setPosition，不进系统的移动循环，那个事件在 Windows 上根本不触发
++// （实测 ui-state.json 从来没生成过，拖完重启她就回到老地方）。
++// 这里 debounce 一下：拖拽期间每秒会来几十次 move，不能每次同步写盘。
++let uiSaveTimer = null
++function scheduleUiStateSave() {
++  if (uiSaveTimer) clearTimeout(uiSaveTimer)
++  uiSaveTimer = setTimeout(() => {
++    uiSaveTimer = null
++    if (!mainWindow || mainWindow.isDestroyed()) return
++    const [x, y] = mainWindow.getPosition()
++    saveUiState({ x, y })
++  }, 400)
++}
++
++// 存档坐标可能来自一台已经拔掉的外接屏：那样她落在所有显示器之外，看不见也点不到，
++// 而托盘只有「重置大小」、没有「回到默认位置」，用户只能去手删 ui-state.json。
++// 跟任一显示器工作区没有交集就当没有存档（同时挡掉 NaN——NaN 传给 setPosition 会崩主进程）。
++function restoreSavedPos(saved) {
++  if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return null
++  const onSomeDisplay = screen.getAllDisplays().some(({ workArea: a }) =>
++    saved.x + 320 > a.x && saved.x < a.x + a.width &&
++    saved.y + 320 > a.y && saved.y < a.y + a.height)
++  return onSomeDisplay ? { x: saved.x, y: saved.y } : null
++}
++
+ function createWindow() {
+   const { width, height } = screen.getPrimaryDisplay().workAreaSize
+-  const saved = loadUiState()
++  const saved = restoreSavedPos(loadUiState())
+ 
+   mainWindow = new BrowserWindow({
+     width: 320,
+     height: 320,
+-    x: saved.x ?? Math.round(width - 380),
+-    y: saved.y ?? Math.round(height - 420),
++    x: saved?.x ?? Math.round(width - 380),
++    y: saved?.y ?? Math.round(height - 420),
      transparent: true,
      frame: false,
      alwaysOnTop: true,
@@ -51,7 +108,7 @@
      hasShadow: false,
      skipTaskbar: false,
      webPreferences: {
-@@ -100,6 +108,15 @@
+@@ -100,6 +134,15 @@
    })
  
    mainWindow.setAlwaysOnTop(true, 'screen-saver')
@@ -67,7 +124,7 @@
    // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
    if (process.platform === 'darwin') {
      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-@@ -231,6 +248,16 @@
+@@ -231,6 +274,16 @@
    })
  }
  
@@ -84,7 +141,7 @@
  // 右键菜单：原生 macOS Menu.popup（自动毛玻璃/定位，替代 HTML 自绘）
  ipcMain.handle('menu:showContext', (_evt, x, y) => {
    const petName = currentPetName || '宠物'
-@@ -249,7 +276,10 @@
+@@ -249,7 +302,10 @@
    template.push({ type: 'separator' })
    template.push({ label: '↺ 重置大小', click: () => send('view:reset') })
    const menu = Menu.buildFromTemplate(template)
@@ -96,7 +153,7 @@
  })
  
  function toggleWindow() {
-@@ -270,14 +300,22 @@
+@@ -270,14 +326,22 @@
  }
  
  // P0-4: 从托盘/菜单打开提醒面板前，先解除窗口穿透 + 抢焦点（否则面板点不动、键盘输不进去）
@@ -119,7 +176,18 @@
  // ---------- IPC：宠物资产读取 ----------
  // 列出 ~/.petpet/pets 下的宠物
  ipcMain.handle('pet:list', () => {
-@@ -390,16 +428,41 @@
+@@ -285,7 +349,9 @@
+     const dirs = fs.readdirSync(PETS_ROOT, { withFileTypes: true })
+       .filter(d => d.isDirectory())
+       .map(d => d.name)
+-      .filter(name => fs.existsSync(path.join(PETS_ROOT, name, 'pet.json')))
++      // 和 pet:load 一个口径（safePetId）：名字带空格/中文/点号的目录列出来也加载不了，
++      // 渲染层会拿它去 loadPet → 直接弹一张加载失败的错误卡片
++      .filter(name => safePetId(name) && fs.existsSync(path.join(PETS_ROOT, name, 'pet.json')))
+     return dirs
+   } catch (e) {
+     return []
+@@ -390,22 +456,50 @@
    })
  }
  
@@ -160,10 +228,58 @@
 +  if (nx === null || ny === null) return console.warn('[PetPet] view:move 收到非法坐标：', x, y)
 +  mainWindow.setPosition(nx, ny)
 +  nudgeHitTest()
++  scheduleUiStateSave()
  })
  
  // 鼠标穿透（借鉴 bitnp：透明区穿透，宠物区交互；forward=true 穿透时仍收 mousemove）
-@@ -619,12 +682,53 @@
+ ipcMain.on('pet:setIgnoreMouse', (_evt, ignore, forward) => {
+   if (!mainWindow || mainWindow.isDestroyed()) return
+-  mainWindow.setIgnoreMouseEvents(ignore, { forward: !!forward })
++  // ignore 也过一遍 !!：非布尔值喂给原生层会抛 conversion failure，而 ipcMain.on
++  // 里的异常没人接，直接变成主进程未捕获异常弹框（forward 一直是这么防的）
++  mainWindow.setIgnoreMouseEvents(!!ignore, { forward: !!forward })
+ })
+ 
+ // 查询窗口当前位置（拖拽用）
+@@ -541,7 +635,7 @@
+     width: 300,
+     height: 400,
+     x,
+-    y: Math.max(0, pos[1]),
++    y,   // 用上面钳制过的那份：原先这里又按 pos[1] 算了一遍，垂直钳制等于没做
+     frame: false,
+     // P1-8: 日记窗口可拖动、可缩放（此前不可移动不可缩放，挡住内容只能退出重开）
+     movable: true,
+@@ -574,7 +668,10 @@
+ 
+ // 设置提醒：{ at: ms 时间戳, repeat: 'none'|'daily'|'weekly', text }
+ ipcMain.handle('reminder:set', (_evt, spec) => {
+-  if (!spec || typeof spec.at !== 'number' || spec.at <= Date.now() + 1000) {
++  // 用 Number.isFinite 而不是 typeof：typeof NaN === 'number' 为真，且 NaN/Infinity
++  // 和任何数比较都是假，两种坏值都能混过 typeof 那关——存进来之后因为 NaN <= now 永远
++  // 为假，这条提醒就再也不会触发，而用户已经收到"好哦，几点叫你"的回复了
++  if (!spec || !Number.isFinite(spec.at) || spec.at <= Date.now() + 1000) {
+     return { error: '时间无效' }
+   }
+   const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
+@@ -609,22 +706,66 @@
+   }
+   send('reminder:fire', { id, text: r.text })
+   appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
+-  if (r.repeat === 'daily') {
+-    r.at += 24 * 3600 * 1000
+-  } else if (r.repeat === 'weekly') {
+-    r.at += 7 * 24 * 3600 * 1000
++  if (r.repeat === 'daily' || r.repeat === 'weekly') {
++    const period = r.repeat === 'daily' ? 24 * 3600 * 1000 : 7 * 24 * 3600 * 1000
++    r.at += period
++    // 一次只推进一个周期的话，机器休眠跨过好几个周期再醒来（比如笔记本合盖一周），
++    // r.at 仍在过去，接下来几秒会连着触发好几次。直接对齐到下一个未来时刻。
++    const now = Date.now()
++    if (r.at <= now) r.at += Math.ceil((now - r.at) / period) * period
+   } else {
+     reminders.delete(id)
+   }
    saveReminders()  // P0-5: 重复提醒推进/一次性删除都要落盘
  }
  
@@ -217,6 +333,16 @@
  }, 1000)
  
  // ---------- 生命周期 ----------
+@@ -635,6 +776,9 @@
+ const openReminderArg = process.argv.includes('--open-reminder')
+ 
+ app.whenReady().then(() => {
++  // P0-5: 存档必须读回来。saveReminders 写的是整份内存 Map，不先载入的话重启后
++  // 第一次落盘就把存档覆盖成空的，而且 reminderSeq 从 0 重新开始、新 ID 会和存档里的撞号
++  loadReminders()
+   registerPetpetProtocol()  // N-3：自定义协议（CSP 已放行 petpet:）
+   createWindow()
+   // macOS Dock 图标：示例宠物头像（内嵌 base64，打包后有效；换宠物时替换此图标）
 --- a/viewer/src/main.ts
 +++ b/viewer/src/main.ts
 @@ -4,7 +4,8 @@
@@ -328,14 +454,16 @@
      const onSprite = sprite ? sprite.getBounds().containsPoint(x, y) : false
      const onUI = uiRects().some(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
      const shouldIgnore = !(onSprite || onUI)
-@@ -184,17 +206,42 @@
+@@ -184,17 +206,44 @@
    document.addEventListener('pointermove', updateMouseIgnore, true)
    // 初始穿透
    setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
 +  // 窗口尺寸/位置一变，角色相对光标的位置就变了，而穿透状态只在这儿（pointermove）重算——
 +  // 鼠标没动时结论就一直是旧的，窗口会卡在"点不到"。主进程在窗口变化后会推一次光标位置过来，
 +  // 这里补算一次（详见 main.js 的 nudgeHitTest）
-+  window.petAPI.onRehit(p => updateMouseIgnore({ clientX: p.x, clientY: p.y }))
++  // 可选调用：这个通道是本地扩展，配旧 preload.cjs（比如只换了 dist 没换 preload）时
++  // 它是 undefined，直接调会抛出去把 init 整个带崩——宠物就白屏了
++  window.petAPI.onRehit?.(p => updateMouseIgnore({ clientX: p.x, clientY: p.y }))
  
    // 单击 = 互动气泡（桌宠灵魂：点宠物有反应；2026-08-06 用户明确：单击不占用为功能入口）
    // 功能入口：托盘爪印（红苕日记/提醒/换肤/动作）+ 右键菜单（触控板双指/辅助点按用户）
@@ -372,7 +500,7 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -356,13 +403,13 @@
+@@ -356,13 +405,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -388,7 +516,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -398,9 +445,13 @@
+@@ -398,9 +447,13 @@
    currentAction = name
    applyScale()
    sprite.play()
@@ -405,7 +533,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +477,18 @@
+@@ -426,12 +479,18 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -430,7 +558,7 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +511,27 @@
+@@ -454,14 +513,32 @@
  }
  
  // ================= 气泡 =================
@@ -450,6 +578,11 @@
 +function showBubbleText(text?: string, scene?: string) {
    const bubble = document.getElementById('bubble')!
 -  const pool = bubblePool()
++  // showFatal 借用同一个气泡元素、会把它改成白底错误卡片，这里复位回正常样式
++  // （不复位的话，出过一次错之后连正常互动气泡也是错误卡片的样式）
++  bubble.style.background = ''
++  bubble.style.maxWidth = ''
++  bubble.style.whiteSpace = ''
 +  const pool = bubblePoolFor(scene)
    bubble.textContent = text || pool[Math.floor(Math.random() * pool.length)]
 +  console.log(`[气泡] ${scene || '默认'}｜${bubble.textContent}`)
@@ -461,21 +594,25 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -488,6 +558,13 @@
-   return pet?.bubbles && pet.bubbles.length > 0 ? pet.bubbles : BUBBLE_TEXTS
- }
- 
+@@ -485,7 +562,16 @@
+ // ================= 文案数据优先（v3 数据下沉） =================
+ // pet.json 的 bubbles / diary / label 优先，代码常量仅作兜底（docs/08 §2.2）
+ function bubblePool(): string[] {
+-  return pet?.bubbles && pet.bubbles.length > 0 ? pet.bubbles : BUBBLE_TEXTS
++  // 校验是数组：写成字符串的话有 length 也能过、取出来是单个字，静默显示成乱码
++  const b = pet?.bubbles
++  return Array.isArray(b) && b.length > 0 ? b : BUBBLE_TEXTS
++}
++
 +// 分场景文案：pet.json 的 bubbleScenes[scene]。没配这个场景就回落通用池——
 +// 老宠物包（只有 bubbles）和官方包走这里，行为与从前完全一致。
 +function bubblePoolFor(scene?: string): string[] {
 +  const pool = scene ? pet?.bubbleScenes?.[scene] : undefined
-+  return pool && pool.length > 0 ? pool : bubblePool()
-+}
-+
++  return Array.isArray(pool) && pool.length > 0 ? pool : bubblePool()
+ }
+ 
  function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
-   const d = pet?.actions?.[name]?.diary
-   if (d && d.mood && d.text) return d
-@@ -515,6 +592,7 @@
+@@ -515,6 +601,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -483,7 +620,7 @@
  }
  
  async function submitReminder() {
-@@ -590,12 +668,75 @@
+@@ -590,12 +677,75 @@
        app.ticker.stop()
      }
    })
@@ -559,6 +696,16 @@
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
  // 有 transitions 则按权重转移（transition 源），否则回 idle（init 源）
+@@ -652,6 +802,9 @@
+ // ================= 启动 =================
+ // P0-2：可见的错误反馈（不透明卡片，替代透明窗口里的静默失败）
+ function showFatal(msg: string) {
++  // 借用同一个气泡元素显示：得先把上一次互动气泡的 6 秒计时器掐掉，
++  // 否则错误卡片刚弹出来就被它收走
++  if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null }
+   const bubble = document.getElementById('bubble')!
+   bubble.textContent = '⚠️ ' + msg
+   bubble.classList.remove('hidden')
 --- a/viewer/src/state-priority.ts
 +++ b/viewer/src/state-priority.ts
 @@ -3,7 +3,7 @@
