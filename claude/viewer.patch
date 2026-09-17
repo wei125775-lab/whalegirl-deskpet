@@ -6,7 +6,7 @@
 #   然后重建：cd viewer && npm install && npm run build
 #   （绿色版应用还要把 dist/ 覆盖进 resources/app/dist/）
 #
-# 改了七件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
+# 改了九件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
 # ③ 外部状态增加 interrupted，按 reactions.interrupted 播反应动作
 # ④ loop:false 的动作一律按一次性处理（播完回待机，不再靠手写名单）
 # ⑤ 窗口几何 IPC 加 NaN 守卫：setPosition / setSize / menu.popup 收到坏坐标会在主进程抛
@@ -15,6 +15,12 @@
 #    openReminderWithFocus() 临时开回来，面板关掉后由 reminder:panel-closed 复位
 # ⑦ petpet:// 协议补 corsEnabled：少了它，渲染层从 file:// fetch 会被判跨源拦掉，
 #    每个动作都得先失败一次再回退 IPC
+# ⑧ 气泡文案分场景：pet.json 新增 bubbleScenes，按 click / working / interrupted / return
+#    各配一套，没配的场景回落 bubbles——老宠物包和官方包行为不变
+# ⑨ 修一个能把宠物"点死"的穿透 bug：窗口尺寸/位置一变，角色相对光标的位置就变，而穿透状态
+#    只在 pointermove 时重算，鼠标没动时结论一直是旧的，窗口就卡在穿透态（实测卡住后连
+#    mousemove 都收不到，怎么移鼠标都点不到她，只能重启）。改成主进程每秒心跳推一次光标
+#    位置让渲染层重算，不再依赖 Electron 的 forward 转发
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 --- a/viewer/main.js
@@ -113,7 +119,22 @@
  // ---------- IPC：宠物资产读取 ----------
  // 列出 ~/.petpet/pets 下的宠物
  ipcMain.handle('pet:list', () => {
-@@ -393,13 +431,24 @@
+@@ -390,16 +428,41 @@
+   })
+ }
+ 
++// 窗口尺寸/位置一变，角色相对光标的位置就跟着变；可穿透状态是渲染层按"光标在不在角色上"算的，
++// 只在 pointermove 时重算——偏偏多数时候鼠标并没动，渲染层就还拿着旧结论，窗口卡在穿透态。
++// 而穿透态下 Electron 的 forward 转发在窗口变动后并不可靠（实测卡住后连 mousemove 都收不到，
++// 用户怎么移鼠标都点不到她，只能重启）。所以改成主进程自己查光标位置推过去，挂在每秒心跳上，
++// 不依赖任何鼠标事件；渲染层算出结论没变就不发 IPC（那边有 lastIgnore 守卫），开销可以忽略。
++function nudgeHitTest() {
++  if (!mainWindow || mainWindow.isDestroyed()) return
++  const pt = screen.getCursorScreenPoint()   // DIP 坐标，与渲染层 clientX 同一套
++  const [wx, wy] = mainWindow.getPosition()
++  mainWindow.webContents.send('pet:rehit', { x: pt.x - wx, y: pt.y - wy })
++}
++
  // 窗口尺寸变化（渲染进程请求调整窗口大小）
  ipcMain.on('view:setSize', (_evt, w, h) => {
    if (!mainWindow || mainWindow.isDestroyed()) return
@@ -127,6 +148,7 @@
 +  if (aw !== nw || ah !== nh) {
 +    console.log(`[PetPet] setSize 未生效：请求 ${nw}x${nh}，实际 ${aw}x${ah}`)
 +  }
++  nudgeHitTest()
  })
  
  // 窗口移动（拖拽宠物）
@@ -137,10 +159,11 @@
 +  const ny = toWinInt(y)
 +  if (nx === null || ny === null) return console.warn('[PetPet] view:move 收到非法坐标：', x, y)
 +  mainWindow.setPosition(nx, ny)
++  nudgeHitTest()
  })
  
  // 鼠标穿透（借鉴 bitnp：透明区穿透，宠物区交互；forward=true 穿透时仍收 mousemove）
-@@ -619,12 +668,52 @@
+@@ -619,12 +682,53 @@
    saveReminders()  // P0-5: 重复提醒推进/一次性删除都要落盘
  }
  
@@ -190,6 +213,7 @@
      if (r.at <= now) fireReminder(id)
    }
 +  pollExternalState()
++  nudgeHitTest()
  }, 1000)
  
  // ---------- 生命周期 ----------
@@ -213,7 +237,11 @@
    label?: string // v3：菜单显示名（优先于内置映射）
    diary?: { mood: string; text: string } // v3：动作→日记心情文案（优先于内置映射）
  }
-@@ -33,6 +35,7 @@
+@@ -30,9 +32,11 @@
+   name: string
+   theme?: string
+   bubbles?: string[] // v3：互动气泡文案池（优先于内置 BUBBLE_TEXTS）
++  bubbleScenes?: Record<string, string[]> // 本地扩展：分场景文案池（click/working/interrupted/return），某个场景没配就回落 bubbles
    cellWidth: number
    cellHeight: number
    error?: string
@@ -221,17 +249,36 @@
    actions: Record<string, PetActionSpec>
    // V2-A: 身份+气质（2026-08-09，可选，缺省=中性，兼容旧包）
    identity?: {
-@@ -69,7 +72,9 @@
+@@ -69,7 +73,10 @@
        appendActivity: (entry: { petId: string; mood: string; text: string }) => void
        openDiary: (petId: string) => void
        onOpenReminder: (cb: () => void) => void
 +      notifyReminderClosed: () => void
        onVisibility: (cb: (visible: boolean) => void) => void  // P2-5: 隐藏时暂停动画
 +      onPetState: (cb: (state: string) => void) => void  // 外部状态信号（Claude 在干活 → 循环吃饭）
++      onRehit: (cb: (p: { x: number; y: number }) => void) => void  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -130,18 +135,29 @@
+@@ -93,6 +100,7 @@
+ } catch { /* ignore */ }
+ let pingpongDir = 1
+ let bubbleTimer: ReturnType<typeof setTimeout> | null = null
++let lastInteractTs = Date.now()   // 上次和她互动的时刻（点她、或收到干活信号），给「久没见」判据用
+ let randomTimer: ReturnType<typeof setInterval> | null = null
+ let transitionTimer: ReturnType<typeof setTimeout> | null = null // 行为链调度（scheduleTransition）
+ let reminderBarOn = false
+@@ -105,6 +113,9 @@
+ const WINDOW_W = 320
+ const WINDOW_H = 320
+ const BUBBLE_TEXTS = ['汪！', '摸摸我～', '今天也要开心哦！', '饿了…有吃的吗？', '(*^▽^*)']
++// 「久没见」的判据：距上次互动（点她 / 收到干活信号）超过这个时长，下次点她就当她久没见你、换一套文案。
++// 纯渲染层判断，不问主进程——她一直在屏幕上，能感觉到的"离开"就是没人理她。
++const RETURN_GAP_MS = 10 * 60 * 1000
+ 
+ // ================= 初始化 =================
+ async function init() {
+@@ -130,18 +141,29 @@
    app.canvas.addEventListener('pointerdown', async (e) => {
      dragging = true
      startScreen = { x: e.screenX, y: e.screenY }
@@ -267,7 +314,30 @@
    })
  
    app.canvas.addEventListener('pointerup', () => { dragging = false })
-@@ -189,12 +205,29 @@
+@@ -168,10 +190,10 @@
+     })
+     return out
+   }
+-  function updateMouseIgnore(e: PointerEvent) {
++  function updateMouseIgnore(pos: { clientX: number; clientY: number }) {
+     if (dragging) return // 拖拽中强制交互
+-    const x = e.clientX
+-    const y = e.clientY
++    const x = pos.clientX
++    const y = pos.clientY
+     const onSprite = sprite ? sprite.getBounds().containsPoint(x, y) : false
+     const onUI = uiRects().some(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
+     const shouldIgnore = !(onSprite || onUI)
+@@ -184,17 +206,42 @@
+   document.addEventListener('pointermove', updateMouseIgnore, true)
+   // 初始穿透
+   setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
++  // 窗口尺寸/位置一变，角色相对光标的位置就变了，而穿透状态只在这儿（pointermove）重算——
++  // 鼠标没动时结论就一直是旧的，窗口会卡在"点不到"。主进程在窗口变化后会推一次光标位置过来，
++  // 这里补算一次（详见 main.js 的 nudgeHitTest）
++  window.petAPI.onRehit(p => updateMouseIgnore({ clientX: p.x, clientY: p.y }))
+ 
+   // 单击 = 互动气泡（桌宠灵魂：点宠物有反应；2026-08-06 用户明确：单击不占用为功能入口）
    // 功能入口：托盘爪印（红苕日记/提醒/换肤/动作）+ 右键菜单（触控板双指/辅助点按用户）
    let downPos = { x: 0, y: 0 }
    let lastPointerUp = 0
@@ -284,7 +354,11 @@
      const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
 -    if (dist < 6) showBubbleText() // 单击 = 互动气泡
 +    if (dist >= 6) return // 拖拽移动窗口，不是点击
-+    showBubbleText() // 单击 = 互动气泡
++    // 单击 = 互动气泡。距上次互动超过 RETURN_GAP_MS 就当她久没见你——同一句"要摸摸头吗"，
++    // 隔十分钟没人理之后说出来，意思是不一样的
++    const since = Date.now() - lastInteractTs
++    lastInteractTs = Date.now()
++    showBubbleText(undefined, since > RETURN_GAP_MS ? 'return' : 'click')
 +    // 点击反应：默认挥手，连点多次后按概率改比心
 +    const now = Date.now()
 +    clickStreak = now - lastClickTs < STREAK_WINDOW ? clickStreak + 1 : 1
@@ -298,7 +372,7 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -356,13 +389,13 @@
+@@ -356,13 +403,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -314,7 +388,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -398,9 +431,13 @@
+@@ -398,9 +445,13 @@
    currentAction = name
    applyScale()
    sprite.play()
@@ -331,7 +405,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +463,18 @@
+@@ -426,12 +477,18 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -356,10 +430,11 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +497,25 @@
+@@ -454,14 +511,27 @@
  }
  
  // ================= 气泡 =================
+-function showBubbleText(text?: string) {
 +// 气泡要贴在**角色头顶**，不能钉死在窗口顶部：角色是画在 canvas 上、尺寸随缩放变，
 +// 而气泡是 DOM 绝对定位。固定 top:8px 的话，缩放后角色变大变小，两者的相对位置就错开了
 +// （表现为"缩放后气泡跑到别的地方"）。
@@ -371,10 +446,13 @@
 +  bubble.style.top = Math.max(2, Math.round(headY - bh - 6)) + 'px'
 +}
 +
- function showBubbleText(text?: string) {
++// text 给了就用它（提醒、缩放这类功能文案），否则从 scene 对应的池里随机挑一条
++function showBubbleText(text?: string, scene?: string) {
    const bubble = document.getElementById('bubble')!
-   const pool = bubblePool()
+-  const pool = bubblePool()
++  const pool = bubblePoolFor(scene)
    bubble.textContent = text || pool[Math.floor(Math.random() * pool.length)]
++  console.log(`[气泡] ${scene || '默认'}｜${bubble.textContent}`)
    bubble.classList.remove('hidden')
    bubble.style.left = '50%'
 -  bubble.style.top = '8px'
@@ -383,7 +461,21 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -515,6 +569,7 @@
+@@ -488,6 +558,13 @@
+   return pet?.bubbles && pet.bubbles.length > 0 ? pet.bubbles : BUBBLE_TEXTS
+ }
+ 
++// 分场景文案：pet.json 的 bubbleScenes[scene]。没配这个场景就回落通用池——
++// 老宠物包（只有 bubbles）和官方包走这里，行为与从前完全一致。
++function bubblePoolFor(scene?: string): string[] {
++  const pool = scene ? pet?.bubbleScenes?.[scene] : undefined
++  return pool && pool.length > 0 ? pool : bubblePool()
++}
++
+ function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
+   const d = pet?.actions?.[name]?.diary
+   if (d && d.mood && d.text) return d
+@@ -515,6 +592,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -391,7 +483,7 @@
  }
  
  async function submitReminder() {
-@@ -590,12 +645,72 @@
+@@ -590,12 +668,75 @@
        app.ticker.stop()
      }
    })
@@ -405,10 +497,11 @@
 +      // 每次都掷的话一轮对话里会被掷好几次，10% 就不止 10% 了）
 +      const alreadyEating = currentAction === 'eat' || currentAction === workAction
 +      if (!alreadyEating) workAction = pickVariant('eat')
++      lastInteractTs = Date.now()   // 收到干活信号 = 人在旁边，不算久没见
 +      // 已经在吃同一份就别重来：重放会把动画拽回第一帧，气泡也会白闪一下
 +      if (textures[workAction] && currentAction !== workAction) {
 +        requestAction(workAction, 'external')
-+        showBubbleText('白饭真好吃')
++        showBubbleText(undefined, 'working')
 +      }
 +    } else if (state === 'interrupted') {
 +      // 用户按 Esc 打断了这一轮（`interrupt-watch.mjs` 从 transcript 里读出来写进状态文件；
@@ -417,6 +510,8 @@
 +      // 反应动作在 pet.json 的 reactions.interrupted 里配；没配就只回待机。
 +      const react = pet?.reactions?.['interrupted']
 +      requestAction(react && textures[react] ? react : 'idle', 'interrupted')
++      lastInteractTs = Date.now()
++      showBubbleText(undefined, 'interrupted')
 +    } else if (state === 'idle' && (currentAction === 'eat' || currentAction === workAction)) {
 +      requestAction(pickPutawayAction(workAction), 'click')
 +    }
@@ -507,11 +602,12 @@
    return priorityOf(req.name) > priorityOf(currentAction)
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
-@@ -23,5 +23,7 @@
+@@ -23,5 +23,8 @@
    notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
    openDiary: (petId) => ipcRenderer.send('diary:open', petId),
    onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
 +  notifyReminderClosed: () => ipcRenderer.send('reminder:panel-closed'),  // 面板关掉 → 主进程恢复"不抢焦点"
    onVisibility: (cb) => ipcRenderer.on('pet:visibility', (_e, visible) => cb(visible)),  // P2-5: 隐藏时暂停动画
 +  onPetState: (cb) => ipcRenderer.on('pet:state', (_e, state) => cb(state)),  // 外部状态信号（Claude 在干活 → 循环吃饭）
++  onRehit: (cb) => ipcRenderer.on('pet:rehit', (_e, p) => cb(p)),  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
  })
