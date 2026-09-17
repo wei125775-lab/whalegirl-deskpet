@@ -2,7 +2,7 @@
 
 ![鲸鱼娘桌宠](../docs/preview/hero.png)
 
-同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。她跟着你干活：你发消息她捧着碗吃（10% 的轮次换成端中碗拿筷子吃），这一轮干完收碗（10% 双手合十给你祝福），你按 Esc 打断她，她停下手里的事甩你一个屑表情。
+同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。她跟着你干活：你发消息她捧着碗吃（10% 的轮次换成端中碗拿筷子吃），**你一派子代理她就收碗、低头看脚边的小鲸鱼绕着她转圈**（跑完了鲸鱼沉入水面），这一轮干完收碗（10% 双手合十给你祝福），你按 Esc 打断她，她停下手里的事甩你一个屑表情。
 
 > **不想手动折腾？让 AI 装**：把仓库链接和这句话发给你的 AI ——
 > 「照 `claude/README.md` 把鲸鱼娘桌宠装上，直接跑 `node claude/install.mjs`（先 `--dry-run` 看一眼），然后按它最后打印的两步收尾。」
@@ -26,7 +26,7 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 1. 找到（本机找不到就 clone）petpet-playbook 源码
 2. 把 `viewer.patch` 打上去（内置 diff 应用器，不强依赖 git，能容忍行尾 CRLF/LF 差异）
 3. 在 viewer 里 `npm install && npm run build`
-4. 三个 hook 放进 `~/.claude/hooks/`、**合并**进 `~/.claude/settings.json`（先备份、只加不改、不覆盖你原有配置）；再把 `whalegirl.petpack` 解到 `~/.petpet/pets/whalegirl/`
+4. 四个 hook 放进 `~/.claude/hooks/`、**合并**进 `~/.claude/settings.json`（先备份、只加不改、不覆盖你原有配置）；再把 `whalegirl.petpack` 解到 `~/.petpet/pets/whalegirl/`
 
 常用参数：`--viewer <源码路径>`、`--pet-exe <PetPet.exe 路径>`（写进 SessionStart 钩子，开 Claude 自动拉起她）、`--no-build`、`--force`。
 
@@ -37,9 +37,9 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 
 ### 它到底改了什么 / 不打补丁会怎样
 
-- **补丁**是对 petpet-playbook **v1.3.0** 生成的（4 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`），加了七件事：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`（打断）、`loop: false` 的动作一律按一次性处理、窗口几何 IPC 加 NaN 守卫（`setPosition` / `setSize` / `menu.popup` 收到坏坐标会让主进程抛未捕获异常、整个 app 弹框崩掉）、窗口默认 `focusable: false`（点她不再把焦点从终端抢走，提醒面板临时开回来）、`petpet://` 协议补 `corsEnabled`（少了它每个动作都要先失败一次再回退 IPC）。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按文件里每处的注释手工合并即可。
-- **已经装过旧版补丁的注意**：脚本靠特征串判断补丁打没打过，判定已打就整步跳过，所以重跑 `install.mjs` **不会**把后来新增的修复补上。要么照着 `claude/viewer.patch` 里那几处手工改，要么把 `viewer/` 还原到 v1.3.0 再重装。
-- **`whalegirl.petpack` 就是个 zip**：顶层 `whalegirl/` 目录，里面 `pet.json` + 10 张精灵表；也能用 PetPet 托盘菜单「导入宠物包」手动装。
+- **补丁**是对 petpet-playbook **v1.3.0** 生成的（4 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs`）。补丁开头有一份完整的改动清单（编号 ①~⑭），摘要：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`、动作可标 `hold`（何时离开由外部信号决定，不参与自动转移链）、`loop: false` 的动作一律按一次性处理**且播完即走**、窗口几何 IPC 加 NaN 守卫、窗口默认 `focusable: false`（点她不再把焦点从终端抢走）、`petpet://` 协议补 `corsEnabled`、气泡文案分场景、**加单实例锁**（否则启动两份就并排出现两只宠物）、外部状态的"文件里是什么"和"上次发过什么"拆成两个变量，外加几处上游 viewer 自己的 bug（提醒重启后不恢复、窗口位置根本不保存、日记窗口会出界等）。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按补丁里每处的注释手工合并即可。
+- **装过旧版补丁的注意**：脚本判断"补丁打没打过"看的是几个**只有最新补丁才有的**特征串（比如 `main.js` 里有没有 `requestSingleInstanceLock`）。旧补丁缺它，所以重跑 `install.mjs` 会**尝试重打**——但旧改动还在、上下文对不上，多半会报"打不上"，这时要么照 `claude/viewer.patch` 手工合并那几处，要么把 `viewer/` 还原到 v1.3.0 再装一遍。（更早的版本是"命中任一关键词就跳过"，那样会静默漏掉后加的修复，已经改掉。）
+- **`whalegirl.petpack` 就是个 zip**：顶层 `whalegirl/` 目录，里面 `pet.json` + 13 张精灵表（14 个动作——`putaway` 和 `subagent_putaway` 共用同一张）；也能用 PetPet 托盘菜单「导入宠物包」手动装。
 - **不打补丁也能跑**：那几个字段会被忽略——永远吃普通的小口饭、点她只会挥手、被打断只是停下（没有屑表情），不会报错、不会卡住。**但前面那个几何 IPC 守卫属于稳定性修复**，不打的话拖拽/缩放时一旦算出坏坐标，主进程会直接弹框退出（是上游 v1.3.0 自带的隐患，不是这个宠物包引入的）。
 
 ### 手动装（不想跑脚本，或脚本卡住了）
@@ -53,15 +53,15 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
    ```
 3. 绿色版再把 `viewer/dist/` 整个覆盖进 `resources/app/dist/`（先删旧的）。
 4. 托盘菜单 → **导入宠物包** → 选 `whalegirl.petpack`。
-5. 三个 hook 按下节的手动配置来挂。
+5. 四个 hook 按下节的手动配置来挂。
 
 ---
 
 ## 想让它跟着 Claude Code 干活
 
-桌宠本身就能跑（待机、点它挥手/比心）。要它"你干活时捧碗吃饭、干完收碗、被打断甩你一眼"还得挂三个 hook——桌宠不知道 Claude 在干什么，得有人告诉它。
+桌宠本身就能跑（待机、点它挥手/比心）。要它"你干活时捧碗吃饭、干完收碗、被打断甩你一眼"还得挂四个 hook——桌宠不知道 Claude 在干什么，得有人告诉它。
 
-把 `petpet-state.mjs`、`interrupt-watch.mjs`、`petpet-launch.mjs` 三个文件放进 `~/.claude/hooks/`（前两个没路径依赖；**`petpet-launch.mjs` 顶部的 `EXE` 那行要改成你自己的 PetPet 路径**），然后改 `~/.claude/settings.json`：
+把 `petpet-state.mjs`、`interrupt-watch.mjs`、`petpet-launch.mjs`、`petpet-subagent.mjs` 四个文件放进 `~/.claude/hooks/`（只有 `petpet-launch.mjs` 需要改路径——它顶部 `EXE` 那行要指向你自己的 PetPet），然后改 `~/.claude/settings.json`：
 
 ```json
 {
@@ -74,18 +74,27 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
     ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "node C:/Users/you/.claude/hooks/petpet-state.mjs idle" }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "node C:/Users/you/.claude/hooks/petpet-subagent.mjs" }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "node C:/Users/you/.claude/hooks/petpet-subagent.mjs" }] }
     ]
   }
 }
 ```
 
-三个各管一摊：
+四个脚本挂在五个事件上，各管一摊：
 
 | hook | 干什么 |
 |---|---|
 | `SessionStart` | 开 Claude 时把 PetPet 和打断检测器拉起来（没在跑才拉） |
 | `UserPromptSubmit` | 你按下回车 → 写 `working` → 她开始吃 |
 | `Stop` | 一轮结束 → 写 `idle` → 她收碗 |
+| `SubagentStart` / `SubagentStop` | 派子代理 → 她收碗、低头看脚边的鲸鱼转圈；全跑完 → 鲸鱼沉入，她接着干活 |
+
+后两个共用 `petpet-subagent.mjs`：它按事件的 `agent_id` 在 `~/.petpet/subagents/` 里建/删一个记号文件，桌宠那边数文件个数。**不用计数器**是因为 hook 是短命且并发的进程，加减一定错——按文件天然免疫。
 
 **如果你不是用绿色版 exe 跑的**（比如 `npm run dev`）：把 `SessionStart` 那行去掉，改成开机后手动跑一次 `node ~/.claude/hooks/interrupt-watch.mjs` 就行——打断检测和吃饭这两件事都不依赖它。
 
@@ -115,6 +124,9 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 | 发出消息、Claude 干活期间 | 捧着碗一口一口吃（循环），并弹一句"吃饭"的气泡。**其中 10% 的轮次会换成端出中碗、拿筷子正经吃一顿**（同样循环，直到这轮结束） |
 
 ![干活时她就这样吃](../docs/preview/eat.gif)
+| **派子代理的时候** | 先把手里的碗收掉，低头看脚边的小鲸鱼绕着她转圈（一直转，直到子代理跑完）；子代理全跑完了鲸鱼沉入水面，她接着回去干活 |
+
+![派子代理时她就这样](../docs/preview/subagent.gif)
 | 这一轮结束 | 收碗，然后 55% 双手托腮发呆 / 10% 双手合十给你祝福一下 / 35% 回待机 |
 | **你按 Esc 打断她** | 立刻停下手里的动作，甩你一个屑表情（眨眼 + 半眯眼笑），然后回待机 |
 | 什么都不做 | 老实待机——长发和尾巴轻轻晃，偶尔眨眼 |

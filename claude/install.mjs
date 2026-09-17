@@ -10,7 +10,7 @@
  * 干四件事：
  *   1. 把 claude/viewer.patch 打到 petpet-playbook 源码上（内置 diff 应用器，不强依赖 git）
  *   2. 在 viewer 里 npm install && npm run build（--no-build 可跳过）
- *   3. 三个 hook 装进 ~/.claude/hooks/，并**合并**进 ~/.claude/settings.json（先备份、只加不改）
+ *   3. 四个 hook 装进 ~/.claude/hooks/，并**合并**进 ~/.claude/settings.json（先备份、只加不改）
  *   4. 把 whalegirl.petpack 解到 ~/.petpet/pets/whalegirl/
  *
  * 幂等：补丁已打过、hook 已挂过、宠物已装过都会跳过；重复跑不会出问题。
@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PATCH = join(HERE, 'viewer.patch')
 const PETPACK = join(HERE, 'whalegirl.petpack')
-const HOOKS = ['petpet-state.mjs', 'interrupt-watch.mjs', 'petpet-launch.mjs']
+const HOOKS = ['petpet-state.mjs', 'interrupt-watch.mjs', 'petpet-launch.mjs', 'petpet-subagent.mjs']
 const UPSTREAM = 'https://github.com/stshourenxy-dev/petpet-playbook.git'
 const UPSTREAM_TAG = 'v1.3.0'          // 补丁就是对这个版本生成的
 const PET_ID = 'whalegirl'
@@ -187,12 +187,23 @@ function applyPatch(patchText, rootDir) {
   return changed
 }
 
+// 补丁指纹：每个文件各查一个"只有最新补丁才有"的特征。
+//
+// **必须是这种跨文件的 AND，不能写成"任一关键词命中"**。原来那版用一个正则测三个文件、
+// 命中一个就算打过，于是装过旧版补丁的机器会被判定为"已打全"而整步跳过，永远拿不到
+// 后续补上的修复。现在 main.js 里没有 requestSingleInstanceLock 就说明是旧补丁，
+// 会走重打——打不上时 applyPatch 会明确报错（上下文对不上），比静默跳过强。
+const PATCH_MARKERS = [
+  ['viewer/main.js', 'requestSingleInstanceLock'],       // 2026-09-18 加的单实例锁
+  ['viewer/src/main.ts', 'pickWorkAction'],              // 干活时挑哪碗饭
+  ['viewer/src/state-priority.ts', 'interrupted'],       // 打断检测那一档
+]
+
 const alreadyPatched = (root) =>
-  ['viewer/src/main.ts', 'viewer/main.js', 'viewer/src/state-priority.ts'].every(rel => {
+  PATCH_MARKERS.every(([rel, marker]) => {
     const p = join(root, rel)
     if (!existsSync(p)) return false
-    const s = readFileSync(p, 'utf8')
-    return /pickVariant|pickWorkAction|EXTERNAL_STATES|interrupted/.test(s)
+    return readFileSync(p, 'utf8').includes(marker)
   })
 
 // ---------------------------------------------------------------- 3. 构建
@@ -214,7 +225,7 @@ function installHooks() {
   const dir = join(CLAUDE_DIR, 'hooks')
   if (DRY) {
     say(`   [dry-run] 复制 ${HOOKS.join(' / ')} → ${dir}`)
-    say(`   [dry-run] 合并三个 hook 进 ${join(CLAUDE_DIR, 'settings.json')}`)
+    say(`   [dry-run] 合并四个 hook 进 ${join(CLAUDE_DIR, 'settings.json')}`)
     return
   }
   mkdirSync(dir, { recursive: true })
@@ -242,6 +253,11 @@ function installHooks() {
     ['SessionStart', node('petpet-launch.mjs')],
     ['UserPromptSubmit', node('petpet-state.mjs', 'working')],
     ['Stop', node('petpet-state.mjs', 'idle')],
+    // 子代理：Start/Stop 两个事件同一个脚本，它按 agent_id 在 ~/.petpet/subagents/ 里
+    // 建/删记号文件，主进程数个数——她就开始低头看脚边的鲸鱼转圈，全跑完了鲸鱼沉入。
+    // 不用计数器是因为 hook 短命且并发，加减必然错。
+    ['SubagentStart', node('petpet-subagent.mjs')],
+    ['SubagentStop', node('petpet-subagent.mjs')],
   ]
   let added = 0
   for (const [event, command] of wanted) {
@@ -252,7 +268,7 @@ function installHooks() {
     added += 1
   }
   if (added === 0) {
-    ok('settings.json 里三个 hook 都已在，没动它（重复跑不会堆备份）')
+    ok('settings.json 里这些 hook 都已在，没动它（重复跑不会堆备份）')
     return
   }
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
