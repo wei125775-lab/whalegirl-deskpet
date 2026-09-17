@@ -404,7 +404,7 @@ async function main() {
   say('     · 图省事：cd ' + (root ? join(root, 'viewer') : '<petpet-playbook>/viewer') + ' && npm run dev')
   say('     · 想常驻：把 viewer/dist/ 覆盖进你那份 PetPet 应用的 resources/app/dist/（先删旧的），或自己 electron-builder 打包')
   say('  2. 重启 Claude Code（让 SessionStart 钩子生效）——之后开 Claude 她就会自己起来')
-  say('     宠物也能在 PetPet 托盘菜单里手动切成「中口吃 / 屑表情 / 祝福」等动作先看看')
+  say('     宠物也能在 PetPet 托盘菜单里手动切成「中口吃 / 屑表情 / 祝福 / 看鲸鱼」等动作先看看')
 }
 
 try {
