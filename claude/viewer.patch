@@ -37,11 +37,39 @@
 #      failure，主进程未捕获异常弹框；同一行的 forward 一直是 !!forward）
 #    - pet:list 与 pet:load 口径不一致：名字带空格/中文/点号的目录会被列出来，
 #      然后加载失败弹错误卡片
+# ⑪ 单实例锁：启动第二份会并排出现两只宠物（调试期反复重启、旧进程没退干净时最明显）。
+#    抢不到锁的直接 app.quit() + process.exit(0)——quit() 是异步的，不跟着 exit 的话
+#    后面 whenReady 照样会跑起来又开一个窗口；另挂 second-instance 把已在跑的那只亮出来
+# ⑫ 动作加 hold 字段：这类动作什么时候离开由外部信号决定，不参与自动转移链。少了它，
+#    被 transition 源带进来的循环动作会挂上转移定时器，到点没链条可走就私自回 idle
+#    （子代理的"低头看鲸鱼"只维持 1.5 秒就站直了）
+# ⑬ 转移定时器的时长下限：2000ms 是给循环动作"播一会儿再换个花样"留的余量，套到
+#    一次性动作上就成了卡顿——这类动作常常不到两秒（收碗 1.12s、子代理出场 1.58s），
+#    却被拖着等满 2s，末帧干定住近一秒才切走。改成 loop:false 用动作自身时长
+# ⑭ 外部状态拆成两个变量：lastFileState（文件里存的是什么，只随 mtime 更新）和
+#    lastStateSent（上次发给渲染层的，纯去重）。合用一个会出事——子代理跑完时要清空
+#    lastStateSent 以逼下一轮重发，若它还兼任"文件里存的是什么"，这一清就把记忆一并
+#    抹了，下一轮落到 else 分支会凭空发出一个 idle，她刚看完鲸鱼沉入就被按回待机
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 --- a/viewer/main.js
 +++ b/viewer/main.js
-@@ -33,7 +33,9 @@
+@@ -7,6 +7,14 @@
+ const { importPetDir, importPetZip } = require('./pet-import.cjs')
+ const { safePetId, isSafeUnderRoot } = require('./security-utils.cjs')
+ 
++// 单实例：启动第二份就会并排出现两只宠物。调试期反复重启、旧进程没退干净时最明显
++// （2026-09-17 用户报"经常性出现两只"）。抢不到锁的直接退——quit() 是异步的，
++// 不跟着 exit 的话下面 whenReady 照样会跑起来，又开一个窗口出来。
++if (!app.requestSingleInstanceLock()) {
++  app.quit()
++  process.exit(0)
++}
++
+ const PETS_ROOT = path.join(app.getPath('home'), '.petpet', 'pets')
+ 
+ // P0（2026-08-09 红苕爸爸 Windows 实测暴露）：启动即自动创建宠物目录，
+@@ -33,7 +41,9 @@
  // N-3：注册自定义协议（需在 app ready 前），渲染层用短 URL 流式读资产
  // petpet://<petId>/<relPath> → 文件系统，零 base64、零主进程内存驻留
  protocol.registerSchemesAsPrivileged([
@@ -52,7 +80,22 @@
  ])
  
  let mainWindow = null
-@@ -75,19 +77,51 @@
+@@ -42,6 +52,14 @@
+ let currentPetActions = null
+ let currentPetName = '宠物'  // P0-3：菜单文案不再硬编码红苕
+ 
++// 第二次启动被上面挡掉后，把已经在跑的那只亮出来（否则用户点了图标毫无反应，以为没开）
++app.on('second-instance', () => {
++  if (!mainWindow) return
++  if (mainWindow.isMinimized()) mainWindow.restore()
++  mainWindow.show()
++  mainWindow.focus()
++})
++
+ // 动作名 → 中文标签（内置兜底映射，pet.json 的 label 优先，见 actionMenuLabel）
+ const ACTION_LABELS = {
+   idle: '待机', sleep: '睡觉', sniff: '嗅闻', wiggle: '撒娇',
+@@ -75,19 +93,51 @@
    }
  }
  
@@ -108,7 +151,7 @@
      hasShadow: false,
      skipTaskbar: false,
      webPreferences: {
-@@ -100,6 +134,15 @@
+@@ -100,6 +150,15 @@
    })
  
    mainWindow.setAlwaysOnTop(true, 'screen-saver')
@@ -124,7 +167,7 @@
    // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
    if (process.platform === 'darwin') {
      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-@@ -231,6 +274,16 @@
+@@ -231,6 +290,16 @@
    })
  }
  
@@ -141,7 +184,7 @@
  // 右键菜单：原生 macOS Menu.popup（自动毛玻璃/定位，替代 HTML 自绘）
  ipcMain.handle('menu:showContext', (_evt, x, y) => {
    const petName = currentPetName || '宠物'
-@@ -249,7 +302,10 @@
+@@ -249,7 +318,10 @@
    template.push({ type: 'separator' })
    template.push({ label: '↺ 重置大小', click: () => send('view:reset') })
    const menu = Menu.buildFromTemplate(template)
@@ -153,7 +196,7 @@
  })
  
  function toggleWindow() {
-@@ -270,14 +326,22 @@
+@@ -270,14 +342,22 @@
  }
  
  // P0-4: 从托盘/菜单打开提醒面板前，先解除窗口穿透 + 抢焦点（否则面板点不动、键盘输不进去）
@@ -176,7 +219,7 @@
  // ---------- IPC：宠物资产读取 ----------
  // 列出 ~/.petpet/pets 下的宠物
  ipcMain.handle('pet:list', () => {
-@@ -285,7 +349,9 @@
+@@ -285,7 +365,9 @@
      const dirs = fs.readdirSync(PETS_ROOT, { withFileTypes: true })
        .filter(d => d.isDirectory())
        .map(d => d.name)
@@ -187,7 +230,7 @@
      return dirs
    } catch (e) {
      return []
-@@ -390,22 +456,50 @@
+@@ -390,22 +472,50 @@
    })
  }
  
@@ -241,7 +284,7 @@
  })
  
  // 查询窗口当前位置（拖拽用）
-@@ -541,7 +635,7 @@
+@@ -541,7 +651,7 @@
      width: 300,
      height: 400,
      x,
@@ -250,7 +293,7 @@
      frame: false,
      // P1-8: 日记窗口可拖动、可缩放（此前不可移动不可缩放，挡住内容只能退出重开）
      movable: true,
-@@ -574,7 +668,10 @@
+@@ -574,7 +684,10 @@
  
  // 设置提醒：{ at: ms 时间戳, repeat: 'none'|'daily'|'weekly', text }
  ipcMain.handle('reminder:set', (_evt, spec) => {
@@ -262,7 +305,7 @@
      return { error: '时间无效' }
    }
    const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
-@@ -609,22 +706,66 @@
+@@ -609,22 +722,117 @@
    }
    send('reminder:fire', { id, text: r.text })
    appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
@@ -294,6 +337,11 @@
 +// 由 interrupt-watch.mjs 写出）被吞掉，她打完断还在端着碗吃。认不出来的值仍按 idle。
 +const EXTERNAL_STATES = new Set(['working', 'interrupted'])
 +let lastStateMtime = 0
++// 拆成两个变量。合用一个会出事：子代理跑完时要把 lastStateSent 清空以逼下一轮重发
++// （见 pollSubagents），若它还兼任"文件里存的是什么"，这一清就把记忆一并抹了，
++// 下一轮落到 else 分支，`'' || 'idle'` 会凭空发出一个 idle——她刚看完鲸鱼沉入就被
++// 按回待机，怎么都不回去吃饭（2026-09-17 用户报"她一直是待机的状态"就是这个）。
++let lastFileState = 'idle'
 +let lastStateSent = ''
 +
 +function pollExternalState() {
@@ -303,22 +351,67 @@
 +  } catch (e) {
 +    return // hook 还没写过，正常
 +  }
-+  let state
 +  if (st.mtimeMs !== lastStateMtime) {
 +    lastStateMtime = st.mtimeMs
-+    state = 'idle'
++    lastFileState = 'idle'
 +    try {
 +      const obj = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'))
-+      if (obj && typeof obj.state === 'string' && EXTERNAL_STATES.has(obj.state)) state = obj.state
++      if (obj && typeof obj.state === 'string' && EXTERNAL_STATES.has(obj.state)) lastFileState = obj.state
 +    } catch (e) { /* 写了一半的撕裂读，按 idle */ }
-+  } else {
-+    state = lastStateSent || 'idle'
 +  }
++  // 文件没动也要照常发：状态是"当前是什么"，不是"这次变了什么"
++  let state = lastFileState
 +  if (Date.now() - st.mtimeMs > STATE_STALE_MS) state = 'idle'
 +  if (state !== lastStateSent) {
 +    lastStateSent = state
 +    console.log('[PetPet] 外部状态 → ' + state)
 +    send('pet:state', state)
++  }
++}
++
++// ---------- 子代理（Claude Code 正派着几个子代理在跑）----------
++// SubagentStart/SubagentStop 两个 hook 在 SUBAGENT_DIR 里建/删记号文件，这里数个数。
++// 不并进 state.json：它是"几个"不是"什么状态"，而且按文件数天然免疫 hook 并发。
++const SUBAGENT_DIR = path.join(app.getPath('home'), '.petpet', 'subagents')
++const SUBAGENT_STALE_MS = 60 * 60 * 1000   // 兜底：hook 没跑到 Stop（会话被杀）时的假计数
++let lastSubagentCount = -1
++
++function countSubagents() {
++  let names
++  try {
++    names = fs.readdirSync(SUBAGENT_DIR)
++  } catch (e) {
++    return 0   // 目录不存在 = 一个都没在跑
++  }
++  const now = Date.now()
++  let n = 0
++  for (const name of names) {
++    const p = path.join(SUBAGENT_DIR, name)
++    try {
++      if (now - fs.statSync(p).mtimeMs > SUBAGENT_STALE_MS) {
++        fs.rmSync(p, { force: true })   // 超时残留，顺手清掉
++        continue
++      }
++      n++
++    } catch (e) { /* 正好被 Stop 删掉了，跳过 */ }
++  }
++  return n
++}
++
++function pollSubagents() {
++  const n = countSubagents()
++  if (n === lastSubagentCount) return
++  const was = lastSubagentCount
++  lastSubagentCount = n
++  console.log('[PetPet] 子代理数量 → ' + n)
++  send('pet:subagent', n)
++  if (n === 0 && was > 0) {
++    // 她这会儿正在播"鲸鱼沉入"（约 1.4 秒）。播完得让她接着干之前的活，
++    // 可 state.json 的内容没变、pollExternalState 按内容去重，不会重发，
++    // 她就一直停在待机——直到用户下次发消息才回过神。这里等动画播完把去重标记
++    // 清掉，逼下一轮重发。清的只是"发过没"这个标记，文件里的状态（lastFileState）
++    // 原样留着，重发的才是真正该播的那个状态。
++    setTimeout(() => { lastStateSent = '' }, 1800)
 +  }
 +}
 +
@@ -329,11 +422,12 @@
      if (r.at <= now) fireReminder(id)
    }
 +  pollExternalState()
++  pollSubagents()
 +  nudgeHitTest()
  }, 1000)
  
  // ---------- 生命周期 ----------
-@@ -635,6 +776,9 @@
+@@ -635,6 +843,9 @@
  const openReminderArg = process.argv.includes('--open-reminder')
  
  app.whenReady().then(() => {
@@ -355,15 +449,35 @@
  import { effectiveWeight } from './temperament' // V2-A: 气质调制器（2026-08-09）
  
  // ================= 类型 =================
-@@ -20,6 +21,7 @@
+@@ -20,19 +21,40 @@
    frameHeight?: number
    scale?: number
    transitions?: Record<string, number>
++  // 本地扩展：保持动作。这类动作由外部状态信号决定什么时候离开（子代理在跑就一直是
++  // "低头看鲸鱼"），不参与自动转移链——否则被 transition 源带进来后会挂上转移定时器，
++  // 到点没链条可走就私自回 idle（subagent_loop 踩过：看鲸鱼 1.5 秒就站直了）。
++  hold?: boolean
 +  variants?: { action: string; weight: number; putaway?: string }[] // 本地扩展：外部信号（干活）时按权重换成别的动作，见 pickWorkAction；putaway 指定这碗用哪条收碗动作
    label?: string // v3：菜单显示名（优先于内置映射）
    diary?: { mood: string; text: string } // v3：动作→日记心情文案（优先于内置映射）
  }
-@@ -30,9 +32,11 @@
+ 
++// 本地扩展：叠加层。一张独立精灵表，按数量叠在角色上（子代理 → 脚边游几只小海豚）。
++// 之所以是独立图层而不是一个动作：动作是整帧替换，没法"她照常吃饭、脚边多两只海豚"。
++interface PetOverlaySpec {
++  file: string
++  frames: number
++  fps?: number
++  loop?: boolean
++  frameWidth?: number   // 缺省用 pet.cellWidth
++  frameHeight?: number
++  scale?: number        // 叠加层相对角色的额外缩放
++  slots: { x: number; y: number; scale?: number }[]  // 每个实例的位置：相对角色画布中心的偏移（画布像素）
++}
++
+ interface PetJson {
+   version: number
+   id: string
    name: string
    theme?: string
    bubbles?: string[] // v3：互动气泡文案池（优先于内置 BUBBLE_TEXTS）
@@ -372,21 +486,24 @@
    cellHeight: number
    error?: string
 +  reactions?: Record<string, string> // 本地扩展：外部状态 → 反应动作（如 interrupted → smug）
++  overlays?: Record<string, PetOverlaySpec> // 本地扩展：叠加层（外部按数量驱动，见 syncOverlays）
    actions: Record<string, PetActionSpec>
    // V2-A: 身份+气质（2026-08-09，可选，缺省=中性，兼容旧包）
    identity?: {
-@@ -69,7 +73,10 @@
+@@ -69,7 +91,12 @@
        appendActivity: (entry: { petId: string; mood: string; text: string }) => void
        openDiary: (petId: string) => void
        onOpenReminder: (cb: () => void) => void
 +      notifyReminderClosed: () => void
        onVisibility: (cb: (visible: boolean) => void) => void  // P2-5: 隐藏时暂停动画
 +      onPetState: (cb: (state: string) => void) => void  // 外部状态信号（Claude 在干活 → 循环吃饭）
++      onOverlay: (cb: (spec: Record<string, number>) => void) => void  // 叠加层数量（当前未启用）
++      onSubagent: (cb: (n: number) => void) => void  // 子代理数量：>0 看鲸鱼，回到 0 鲸鱼沉入
 +      onRehit: (cb: (p: { x: number; y: number }) => void) => void  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -93,6 +100,7 @@
+@@ -93,6 +120,7 @@
  } catch { /* ignore */ }
  let pingpongDir = 1
  let bubbleTimer: ReturnType<typeof setTimeout> | null = null
@@ -394,7 +511,18 @@
  let randomTimer: ReturnType<typeof setInterval> | null = null
  let transitionTimer: ReturnType<typeof setTimeout> | null = null // 行为链调度（scheduleTransition）
  let reminderBarOn = false
-@@ -105,6 +113,9 @@
+@@ -101,10 +129,20 @@
+ let curWinH = 320
+ let curWinX = 0
+ let curWinY = 0
++// 叠加层：key = overlays 里的名字，值是按 slot 索引对齐的实例数组（空位为 null）。
++// 纹理单独缓存，切动作时不清——叠加层和动作是两套生命周期。
++const overlayTex = new Map<string, PIXI.Texture[]>()
++const overlaySprites = new Map<string, (PIXI.AnimatedSprite | null)[]>()
++// 子代理在不在跑。用独立状态位而不是从 currentAction 反推：退出信号来的时候
++// 动作链可能正卡在出场/循环任意一段，靠动作名判断会漏。
++let subagentActive = false
+ 
  const WINDOW_W = 320
  const WINDOW_H = 320
  const BUBBLE_TEXTS = ['汪！', '摸摸我～', '今天也要开心哦！', '饿了…有吃的吗？', '(*^▽^*)']
@@ -404,7 +532,15 @@
  
  // ================= 初始化 =================
  async function init() {
-@@ -130,18 +141,29 @@
+@@ -114,6 +152,7 @@
+     resizeTo: window,
+     resolution: Math.min(window.devicePixelRatio || 1, 2)
+   })
++  app.stage.sortableChildren = true   // 叠加层要靠 zIndex 稳定压在角色上面（否则切动作时 addChild 会打乱层级）
+   document.getElementById('stage')?.replaceWith(app.canvas)
+   app.canvas.style.width = '100%'
+   app.canvas.style.height = '100%'
+@@ -130,18 +169,29 @@
    app.canvas.addEventListener('pointerdown', async (e) => {
      dragging = true
      startScreen = { x: e.screenX, y: e.screenY }
@@ -440,7 +576,7 @@
    })
  
    app.canvas.addEventListener('pointerup', () => { dragging = false })
-@@ -168,10 +190,10 @@
+@@ -168,10 +218,10 @@
      })
      return out
    }
@@ -454,7 +590,7 @@
      const onSprite = sprite ? sprite.getBounds().containsPoint(x, y) : false
      const onUI = uiRects().some(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
      const shouldIgnore = !(onSprite || onUI)
-@@ -184,17 +206,44 @@
+@@ -184,17 +234,44 @@
    document.addEventListener('pointermove', updateMouseIgnore, true)
    // 初始穿透
    setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
@@ -500,7 +636,146 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -356,13 +405,13 @@
+@@ -347,6 +424,138 @@
+   textures[name] = frames
+ }
+ 
++// ================= 叠加层 =================
++// 和动作的区别：动作是整帧替换，同一时刻只能有一个；叠加层是"角色照常演，额外再画几层"。
++// 外部按数量驱动（主进程每秒数一遍在跑的子代理个数 → pet:overlay），所以这里只做增删同步。
++// 按 slot 逐个淡入淡出：直接 add/remove 会"啪"地出现，太硬。
++const OVERLAY_FADE = 0.2   // 每帧逼近目标的系数，约 0.3 秒淡完
++
++async function loadOverlayTex(name: string) {
++  const ov = pet?.overlays?.[name]
++  if (!ov || overlayTex.has(name)) return
++  const url = `petpet://${petId}/${ov.file}`
++  let tex: PIXI.Texture
++  try {
++    tex = await PIXI.Assets.load(url)
++  } catch (e) {
++    console.warn(`叠加层 ${name} 协议加载失败，回退 IPC: ${e}`)
++    const res = await window.petAPI.getFile(petId, ov.file)
++    if (!res.dataUrl) {
++      console.warn(`叠加层 ${name} 精灵表加载失败: ${res.error}`)
++      return
++    }
++    tex = await PIXI.Assets.load(res.dataUrl)
++  }
++  const fw = ov.frameWidth || pet!.cellWidth
++  const fh = ov.frameHeight || pet!.cellHeight
++  const cols = Math.max(1, Math.floor(tex.width / fw))
++  const frames: PIXI.Texture[] = []
++  for (let i = 0; i < ov.frames; i++) {
++    frames.push(new PIXI.Texture({
++      source: tex.source,
++      frame: new PIXI.Rectangle((i % cols) * fw, 0, fw, fh)
++    }))
++  }
++  overlayTex.set(name, frames)
++}
++
++function fadeOverlay(s: PIXI.AnimatedSprite, target: number, onDone?: () => void) {
++  const step = () => {
++    if (s.destroyed) return
++    const d = target - s.alpha
++    if (Math.abs(d) < 0.05) {
++      s.alpha = target
++      onDone?.()
++      return
++    }
++    s.alpha += d * OVERLAY_FADE
++    requestAnimationFrame(step)
++  }
++  requestAnimationFrame(step)
++}
++
++function addOverlay(name: string, slotIdx: number) {
++  const frames = overlayTex.get(name)
++  const ov = pet?.overlays?.[name]
++  if (!frames || !ov) return
++  const s = new PIXI.AnimatedSprite(frames)
++  s.anchor.set(0.5)
++  s.animationSpeed = (ov.fps || 12) / 60
++  s.loop = ov.loop !== false
++  s.alpha = 0
++  s.zIndex = 20          // 压在角色（zIndex 10）上面——素材里海豚是遮住她的鞋的
++  s.play()
++  // 错开起始帧：同一张表叠两只的话，左右逐帧完全同步，一眼就是复制粘贴。
++  // 随机相位后各游各的，才像两只独立的活物。
++  s.gotoAndPlay(Math.floor(Math.random() * frames.length))
++  app.stage.addChild(s)
++  fadeOverlay(s, 1)
++  overlaySprites.get(name)![slotIdx] = s
++}
++
++// 外部数量变了就同步：多出来的淡入，少掉的淡出后销毁。数量上限 = slots 的个数。
++async function syncOverlays(spec: Record<string, number>) {
++  if (!pet?.overlays) return
++  for (const name of Object.keys(pet.overlays)) {
++    const ov = pet.overlays[name]
++    const want = Math.max(0, Math.min(spec?.[name] || 0, ov.slots.length))
++    if (want > 0) await loadOverlayTex(name)
++    if (!overlaySprites.has(name)) {
++      overlaySprites.set(name, new Array(ov.slots.length).fill(null))
++    }
++    const arr = overlaySprites.get(name)!
++    for (let i = 0; i < arr.length; i++) {
++      if (i < want && !arr[i]) addOverlay(name, i)
++      else if (i >= want && arr[i]) {
++        const dying = arr[i]!
++        arr[i] = null
++        fadeOverlay(dying, 0, () => dying.destroy())
++      }
++    }
++    positionOverlays()
++  }
++}
++
++// 叠加层跟着角色走：位置用"相对角色画布中心的偏移"，所以要乘上角色当前的缩放系数。
++function positionOverlays() {
++  if (!sprite) return
++  const sc = sprite.scale.x
++  const cx = sprite.position.x
++  const cy = sprite.position.y
++  for (const [name, arr] of overlaySprites) {
++    const ov = pet?.overlays?.[name]
++    if (!ov) continue
++    arr.forEach((s, i) => {
++      const slot = ov.slots[i]
++      if (!s || !slot) return
++      s.position.set(cx + slot.x * sc, cy + slot.y * sc)
++      s.scale.set(sc * (ov.scale || 1) * (slot.scale || 1))
++    })
++  }
++}
++
++// ================= 子代理 =================
++// 子代理在跑的时候，她停下手里的事看脚边的鲸鱼转圈；跑完了鲸鱼沉入水面、她回去干活。
++// 三段动作（出场 / 循环 / 沉入）靠 pet.json 的 transitions 自己串起来，
++// 这里只管"进入"和"退出"两个时刻，中间不用插手。
++function syncSubagent(n: number) {
++  if (!pet) return
++  const want = n > 0
++  if (want === subagentActive) return
++  subagentActive = want
++  if (want) {
++    // 派子代理一般发生在"她正在干活"，也就是端着碗吃——先收碗再进入。
++    // 直接从吃饭切到站着看鲸鱼会跳一下（两张表的站姿对不上）。
++    const eating = currentAction === 'eat' || currentAction === workAction
++    const enter = eating && textures['subagent_putaway'] ? 'subagent_putaway' : 'subagent_in'
++    console.log(`[子代理] ${n} 个在跑（当前 ${currentAction}）→ ${enter}`)
++    requestAction(enter, 'external')
++  } else {
++    console.log('[子代理] 都跑完了 → 鲸鱼沉入')
++    if (textures['subagent_out']) requestAction('subagent_out', 'external')
++  }
++}
++
+ function updateTitle() {
+   if (pet) document.title = `PetPet - ${pet.name}`
+ }
+@@ -356,13 +565,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -516,7 +791,12 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -398,9 +447,13 @@
+@@ -394,13 +603,18 @@
+     })
+   }
+ 
++  sprite.zIndex = 10   // 角色在叠加层（20）下面
+   app.stage.addChild(sprite)
    currentAction = name
    applyScale()
    sprite.play()
@@ -528,12 +808,12 @@
 +  // loop:true 会永远循环下去。用户手动/提醒进入的循环动作不设转移（手动切换不被自动打断）。
 +  // pet.json 里 loop:false 的动作一律按一次性处理（不再只认手写名单）——
 +  // 否则新增的一次性动作（如 eat_mid_putaway）播完会定格在末帧。
-+  if (source === 'random' || source === 'transition' || isOneshot(name)
-+      || pet?.actions?.[name]?.loop === false) scheduleTransition(name)
++  if (!act.hold && (source === 'random' || source === 'transition' || isOneshot(name)
++      || pet?.actions?.[name]?.loop === false)) scheduleTransition(name)
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +479,18 @@
+@@ -426,12 +640,19 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -555,10 +835,11 @@
 +    curWinH = newH
 +  }
 +  positionBubble()   // 缩放后角色大小变了，气泡要重新贴回头顶（否则相对位置会错开）
++  positionOverlays()  // 同理：叠加层的位置/缩放都是按角色画布算的
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +513,32 @@
+@@ -454,14 +675,32 @@
  }
  
  // ================= 气泡 =================
@@ -594,7 +875,7 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -485,7 +562,16 @@
+@@ -485,7 +724,16 @@
  // ================= 文案数据优先（v3 数据下沉） =================
  // pet.json 的 bubbles / diary / label 优先，代码常量仅作兜底（docs/08 §2.2）
  function bubblePool(): string[] {
@@ -612,7 +893,7 @@
  }
  
  function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
-@@ -515,6 +601,7 @@
+@@ -515,6 +763,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -620,7 +901,7 @@
  }
  
  async function submitReminder() {
-@@ -590,12 +677,75 @@
+@@ -590,12 +839,84 @@
        app.ticker.stop()
      }
    })
@@ -635,8 +916,9 @@
 +      const alreadyEating = currentAction === 'eat' || currentAction === workAction
 +      if (!alreadyEating) workAction = pickVariant('eat')
 +      lastInteractTs = Date.now()   // 收到干活信号 = 人在旁边，不算久没见
-+      // 已经在吃同一份就别重来：重放会把动画拽回第一帧，气泡也会白闪一下
-+      if (textures[workAction] && currentAction !== workAction) {
++      // 在看鲸鱼的时候别打断她——子代理期间 Claude 每轮对话都会再发一次 working。
++      // 已经在吃同一份也别重来：重放会把动画拽回第一帧，气泡也会白闪一下。
++      if (!subagentActive && textures[workAction] && currentAction !== workAction) {
 +        requestAction(workAction, 'external')
 +        showBubbleText(undefined, 'working')
 +      }
@@ -653,6 +935,14 @@
 +      requestAction(pickPutawayAction(workAction), 'click')
 +    }
 +  })
++  // 叠加层数量（主进程每秒数一遍在跑的子代理个数 → 这里按数量增减小海豚）。
++  // 和动作无关：她在吃饭也好、待机也好，海豚只是多画在她脚边。
++  window.petAPI.onOverlay((spec) => {
++    console.log(`[叠加层] 收到 ${JSON.stringify(spec)}`)
++    void syncOverlays(spec)
++  })
++  // 子代理数量：>0 她停下手里的事看鲸鱼，回到 0 鲸鱼沉入水面
++  window.petAPI.onSubagent((n) => syncSubagent(n))
  }
  
  // ================= 随机行为 =================
@@ -696,7 +986,20 @@
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
  // 有 transitions 则按权重转移（transition 源），否则回 idle（init 源）
-@@ -652,6 +802,9 @@
+@@ -603,7 +924,11 @@
+   if (transitionTimer) { clearTimeout(transitionTimer); transitionTimer = null }
+   const act = pet?.actions?.[name]
+   if (!act) return
+-  const durMs = Math.min(12000, Math.max(2000, ((act.frames || 1) / (act.fps || 4)) * 1000))
++  // 2000ms 下限是给循环动作"播一会儿再换个花样"留的余量，套到一次性动作上就成了
++  // 卡顿：这类动作本身常常不到两秒（收碗 9 帧 @8fps = 1.12s、子代理出场 1.58s），
++  // 却被拖着等满 2s，末帧干定住近一秒才切走。一次性动作就该播完即走。
++  const selfMs = ((act.frames || 1) / (act.fps || 4)) * 1000
++  const durMs = Math.min(12000, Math.max(act.loop === false ? 200 : 2000, selfMs))
+   transitionTimer = setTimeout(() => {
+     transitionTimer = null
+     if (!pet || currentAction !== name) return
+@@ -652,6 +977,9 @@
  // ================= 启动 =================
  // P0-2：可见的错误反馈（不透明卡片，替代透明窗口里的静默失败）
  function showFatal(msg: string) {
@@ -749,12 +1052,14 @@
    return priorityOf(req.name) > priorityOf(currentAction)
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
-@@ -23,5 +23,8 @@
+@@ -23,5 +23,10 @@
    notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
    openDiary: (petId) => ipcRenderer.send('diary:open', petId),
    onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
 +  notifyReminderClosed: () => ipcRenderer.send('reminder:panel-closed'),  // 面板关掉 → 主进程恢复"不抢焦点"
    onVisibility: (cb) => ipcRenderer.on('pet:visibility', (_e, visible) => cb(visible)),  // P2-5: 隐藏时暂停动画
 +  onPetState: (cb) => ipcRenderer.on('pet:state', (_e, state) => cb(state)),  // 外部状态信号（Claude 在干活 → 循环吃饭）
++  onOverlay: (cb) => ipcRenderer.on('pet:overlay', (_e, spec) => cb(spec)),  // 叠加层数量（当前未启用，代码留着以后做道具/特效）
++  onSubagent: (cb) => ipcRenderer.on('pet:subagent', (_e, n) => cb(n)),  // 子代理数量：>0 她停下看鲸鱼，回到 0 鲸鱼沉入
 +  onRehit: (cb) => ipcRenderer.on('pet:rehit', (_e, p) => cb(p)),  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
  })
