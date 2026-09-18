@@ -3,7 +3,7 @@
   "id": "whalegirl-hd",
   "displayName": "鲸鱼娘",
   "description": "自己做的鲸鱼娘：待机是分层烘焙的呼吸+飘发+眨眼，其余动作由 AI 视频转序列帧。干活时捧着碗一直吃，干完收碗，点她会挥手/比心。",
-  "version": "1.3.1",
+  "version": "1.6.0",
   "author": "wei125775-lab",
   "license": "MIT",
   "renderer": "frames2d",
@@ -48,18 +48,6 @@
           "f05.png",
           "f06.png",
           "f07.png",
-          "f08.png",
-          "f09.png",
-          "f10.png",
-          "f11.png",
-          "f12.png",
-          "f13.png",
-          "f12.png",
-          "f11.png",
-          "f10.png",
-          "f09.png",
-          "f08.png",
-          "f07.png",
           "f06.png",
           "f05.png",
           "f04.png",
@@ -75,13 +63,9 @@
           "f04.png",
           "f05.png",
           "f06.png",
-          "f07.png",
-          "f08.png",
-          "f09.png"
+          "f07.png"
         ],
         "frameMs": [
-          125,
-          125,
           125,
           125,
           125,
@@ -94,9 +78,6 @@
       },
       "wave": {
         "frames": [
-          "f01.png",
-          "f02.png",
-          "f03.png",
           "f04.png",
           "f05.png",
           "f06.png",
@@ -119,19 +100,12 @@
           "f23.png",
           "f24.png",
           "f25.png",
-          "f26.png",
-          "f27.png",
-          "f28.png",
-          "f29.png",
-          "f30.png"
+          "f26.png"
         ],
         "loop": false
       },
       "heart": {
         "frames": [
-          "f01.png",
-          "f02.png",
-          "f03.png",
           "f04.png",
           "f05.png",
           "f06.png",
@@ -164,7 +138,6 @@
       },
       "touchface": {
         "frames": [
-          "f01.png",
           "f02.png",
           "f03.png",
           "f04.png",
@@ -191,9 +164,7 @@
           "f25.png",
           "f26.png",
           "f27.png",
-          "f28.png",
-          "f29.png",
-          "f30.png"
+          "f28.png"
         ],
         "loop": false
       },
@@ -235,7 +206,6 @@
       },
       "smug": {
         "frames": [
-          "f01.png",
           "f02.png",
           "f03.png",
           "f04.png",
@@ -262,9 +232,77 @@
           "f25.png",
           "f26.png",
           "f27.png",
-          "f28.png",
-          "f29.png",
-          "f30.png"
+          "f28.png"
+        ],
+        "loop": false,
+        "fallback": "idle"
+      },
+      "subagent-in": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png",
+          "f18.png",
+          "f19.png"
+        ],
+        "loop": false,
+        "fallback": "idle"
+      },
+      "subagent-loop": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png",
+          "f18.png"
+        ]
+      },
+      "subagent-out": {
+        "frames": [
+          "f01.png",
+          "f02.png",
+          "f03.png",
+          "f04.png",
+          "f05.png",
+          "f06.png",
+          "f07.png",
+          "f08.png",
+          "f09.png",
+          "f10.png",
+          "f11.png",
+          "f12.png",
+          "f13.png",
+          "f14.png",
+          "f15.png",
+          "f16.png",
+          "f17.png"
         ],
         "loop": false,
         "fallback": "idle"
@@ -273,11 +311,14 @@
     "phases": {
       "idle": "idle",
       "waiting": "eat",
-      "thinking": "eat-mid",
+      "thinking": "eat",
       "tool": "eat",
       "review": "eat",
       "done": "idle",
-      "failed": "smug"
+      "failed": "smug",
+      "whale-in": "subagent-in",
+      "whale-loop": "subagent-loop",
+      "whale-out": "subagent-out"
     }
   },
   "gameplay": {
@@ -301,21 +342,32 @@
             {
               "probability": 0.2,
               "state": "touchface",
-              "stateMs": 2490,
+              "stateMs": 2324,
               "phrases": [
                 "在想事情呢",
                 "唔……"
               ]
             },
             {
-              "probability": 0.65,
+              "probability": 0.57,
               "state": "wave",
-              "stateMs": 2700,
+              "stateMs": 1992,
               "phrases": [
                 "嗨～",
                 "在呢在呢",
                 "要摸摸头吗？",
                 "尾巴甩甩～"
+              ]
+            },
+            {
+              "probability": 0.08,
+              "state": "smug",
+              "stateMs": 2324,
+              "phrases": [
+                "就这？",
+                "哼。",
+                "我什么都没说。",
+                "还行吧。"
               ]
             }
           ]
