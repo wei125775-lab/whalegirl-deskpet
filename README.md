@@ -40,7 +40,9 @@
 | 版本 | 给谁用 | 怎么装 |
 |---|---|---|
 | **Claude Code 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 桌宠，跟 Claude Code 联动的那只 | `node claude/install.mjs` → 按它打印的收尾。详见 [`claude/README.md`](claude/README.md) |
-| **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | 双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh |
+| **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | **先装渲染器 [`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)**，再双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh |
+
+> ⚠️ dsh 版的渲染器是**另一个插件**（`@linxin666/dsh-pet`），本包只管把素材放好、把她画出来的是它。没装渲染器就装本包，**不会坏**，但界面上什么都不会出现 —— 安装脚本会在收尾明确告诉你还差这一步、以及怎么装。装完渲染器重启即可，**不用重跑本脚本**。
 
 两个安装脚本都是**幂等**的：会自己找/下依赖，改配置前先备份，重复跑不会出问题；都能加 `--dry-run` 先看它会改什么。
 
