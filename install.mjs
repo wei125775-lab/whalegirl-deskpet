@@ -84,14 +84,12 @@ try {
 
 // 1. Warn (do not fail) when the pet renderer is absent: the files still land
 // in the right place, they just will not show up until dsh-pet is installed.
-if (existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))) {
+// The closing message depends on this, so it is computed once here.
+const hasRenderer = existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
+if (hasRenderer) {
   console.log('renderer   : ' + REQUIRED + ' found')
 } else {
-  console.log('')
-  console.log('WARNING: ' + REQUIRED + ' is not installed in this profile.')
-  console.log('         The pet files will be released, but nothing will render them.')
-  console.log('         Install it first:  dsh plugin add ' + REQUIRED)
-  console.log('')
+  console.log('renderer   : ' + REQUIRED + ' ** NOT INSTALLED ** — she will not show up yet (see the end)')
 }
 
 if (dryRun) {
@@ -150,6 +148,33 @@ try {
 }
 
 console.log('')
-console.log('Done. Restart DshDesktop to load the pet (pet v' + petVersion + ').')
-console.log('The pet shows up as 鲸鱼娘 (id: whalegirl-hd) in the pet picker.')
-console.log('If it does not appear, restart once more — the pet directory is scanned during startup.')
+if (hasRenderer) {
+  console.log('Done. Restart DshDesktop to load the pet (pet v' + petVersion + ').')
+  console.log('The pet shows up as 鲸鱼娘 (id: whalegirl-hd) in the pet picker.')
+  console.log('If it does not appear, restart once more — the pet directory is scanned during startup.')
+} else {
+  // 收尾必须是"还差一步"，不能是乐观的 Done —— 否则人家装完重启、什么都没看到，只会以为这包是坏的。
+  const pnpmStore = process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, 'pnpm', 'store')
+    : undefined
+  const virtualStore = join(profile.dir, 'node_modules', '.pnpm')
+  console.log('!! She will NOT show up yet — this profile has no renderer.')
+  console.log('')
+  console.log('   ' + REQUIRED + ' is the plugin that actually draws her. Our package only')
+  console.log('   puts the assets in place, so nothing renders them until it is installed.')
+  console.log('')
+  console.log('   The good news: the assets are already there. Install the renderer and she')
+  console.log('   appears on the next restart — no need to run this script again.')
+  console.log('')
+  console.log('   Either way works:')
+  console.log('     - In the dsh UI: open the plugin market and search for "dsh-pet".')
+  console.log('     - Or from a terminal:')
+  console.log('         dsh plugin --profile ' + profile.name + ' add ' + REQUIRED)
+  if (pnpmStore !== undefined) console.log('           --store-dir=' + pnpmStore)
+  console.log('           --virtual-store-dir=' + virtualStore)
+  console.log('')
+  console.log('   Both store flags are required: the pnpm bundled with dsh does not read the')
+  console.log("   profile's .npmrc, and leaving either one out fails with ERR_PNPM_UNEXPECTED_STORE.")
+  console.log('')
+  console.log('   Then restart DshDesktop — she shows up in the pet picker as 鲸鱼娘 (whalegirl-hd).')
+}
