@@ -12,9 +12,10 @@
  *           --dry-run         show what would happen, change nothing
  */
 
+import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PKG_NAME = '@wei125775-lab/whalegirl-deskpet'
@@ -30,6 +31,7 @@ const flag = (name) => {
   return hit === undefined ? undefined : hit.includes('=') ? hit.slice(hit.indexOf('=') + 1) : ''
 }
 const dryRun = flag('dry-run') !== undefined
+const skipRenderer = flag('no-renderer') !== undefined
 const wantProfile = flag('profile')
 
 const dshHome = (process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
@@ -63,6 +65,81 @@ function resolveProfile() {
   fail('cannot tell which profile to use (' + names.join(', ') + '). Pass --profile=<name>.')
 }
 
+/** 找得到 dsh 命令行就返回它的路径；找不到返回 undefined（非 Windows 交给 PATH）。 */
+function findDshCli() {
+  if (process.platform !== 'win32') return 'dsh'
+  const candidates = []
+  if (process.env.APPDATA) candidates.push(join(process.env.APPDATA, 'npm', 'dsh.cmd'))
+  if (process.env.ProgramFiles) candidates.push(join(process.env.ProgramFiles, 'nodejs', 'dsh.cmd'))
+  if (process.env['ProgramFiles(x86)']) candidates.push(join(process.env['ProgramFiles(x86)'], 'nodejs', 'dsh.cmd'))
+  for (const c of candidates) if (existsSync(c)) return c
+  for (const dir of (process.env.PATH ?? '').split(sep)) {
+    if (dir === '') continue
+    for (const name of ['dsh.cmd', 'dsh.exe', 'dsh']) {
+      const c = join(dir, name)
+      if (existsSync(c)) return c
+    }
+  }
+  return undefined
+}
+
+/**
+ * pnpm 的两个 store 目录 —— 从 profile 的 `.npmrc` 读，读不到再退回默认。
+ * 必须显式传给 `dsh plugin`：dsh 内置的 pnpm v11 不再自动读 profile 的 .npmrc，
+ * 少任一个都会以 ERR_PNPM_UNEXPECTED_STORE 退出。
+ */
+function storeDirs(profileDir) {
+  let storeDir
+  let virtualStoreDir
+  try {
+    for (const line of readFileSync(join(profileDir, '.npmrc'), 'utf8').split(/\r?\n/)) {
+      const m = /^\s*(store-dir|virtual-store-dir)\s*=\s*(.+?)\s*$/.exec(line)
+      if (m === null) continue
+      if (m[1] === 'store-dir') storeDir = m[2]
+      else virtualStoreDir = m[2]
+    }
+  } catch { /* 没 .npmrc 就用默认 */ }
+  return {
+    storeDir: storeDir ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'pnpm', 'store') : undefined),
+    virtualStoreDir: virtualStoreDir ?? join(profileDir, 'node_modules', '.pnpm'),
+  }
+}
+
+/**
+ * 没装渲染器就替你装上。
+ *
+ * 走 dsh 自己的 `plugin add`（= 转发给 pnpm）—— 实测它一条命令把两件事都做了：
+ * 装包 + 写进 `dsh.profile.bundles`，所以不用我们手动改 profile manifest。
+ *
+ * 失败一律只警告、返回 false，绝不抛：素材这时已经放好了，最坏结果只是"暂时还看不到她"，
+ * 按收尾那段手动装即可。返回是否装成。
+ */
+function installRenderer(profile) {
+  const cli = findDshCli()
+  if (cli === undefined) {
+    console.log('   找不到 dsh 命令行（PATH 上和 npm 全局都没有），没法自动装。')
+    return false
+  }
+  const { storeDir, virtualStoreDir } = storeDirs(profile.dir)
+  const args = [
+    'plugin', '--profile', profile.name, 'add', REQUIRED,
+    ...(storeDir === undefined ? [] : ['--store-dir=' + storeDir]),
+    '--virtual-store-dir=' + virtualStoreDir,
+  ]
+  console.log('   ' + cli + ' ' + args.join(' '))
+  // Windows 上的 dsh.cmd 是批处理，必须走 shell。args 全是本脚本拼的字面量，没有外部输入。
+  const r = spawnSync(cli, args, { stdio: 'inherit', shell: process.platform === 'win32' })
+  if (r.error !== undefined) {
+    console.log('   启动失败：' + r.error.message)
+    return false
+  }
+  if (r.status !== 0) {
+    console.log('   dsh 退出码 ' + r.status + '（多半是网络或 pnpm store 的问题）')
+    return false
+  }
+  return existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
+}
+
 const profile = resolveProfile()
 const profileJson = join(profile.dir, 'package.json')
 const installedAt = join(profile.dir, 'node_modules', ...PKG_NAME.split('/'))
@@ -85,7 +162,7 @@ try {
 // 1. Warn (do not fail) when the pet renderer is absent: the files still land
 // in the right place, they just will not show up until dsh-pet is installed.
 // The closing message depends on this, so it is computed once here.
-const hasRenderer = existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
+let hasRenderer = existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
 if (hasRenderer) {
   console.log('renderer   : ' + REQUIRED + ' found')
 } else {
@@ -97,7 +174,19 @@ if (dryRun) {
   console.log('[dry-run] would copy   ' + here + '  ->  ' + installedAt)
   console.log('[dry-run] would register ' + PKG_NAME + ' in dependencies + bundles (pet v' + petVersion + ')')
   console.log('[dry-run] would patch @linxin666/dsh-pet phases with ' + 'whale-in / whale-loop / whale-out')
+  if (!hasRenderer && !skipRenderer) {
+    console.log('[dry-run] would install the renderer:  dsh plugin --profile ' + profile.name + ' add ' + REQUIRED)
+  }
   process.exit(0)
+}
+
+// 1.5 渲染器：没装就替你装上。没有它什么都不会显示，而这一步对陌生人最容易漏。
+// 默认装（用户要的行为）；不想要这个副作用就加 --no-renderer。
+if (!hasRenderer && !skipRenderer) {
+  console.log('renderer   : not installed — installing it now (pass --no-renderer to skip)')
+  hasRenderer = installRenderer(profile)
+  console.log('')
+  console.log('renderer   : ' + (hasRenderer ? 'installed OK' : 'auto-install did not succeed — see the manual steps at the end'))
 }
 
 // 2. Copy the package (drop any previous copy first so stale frames cannot linger).
