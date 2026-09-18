@@ -3,7 +3,7 @@
   "id": "whalegirl-hd",
   "displayName": "鲸鱼娘",
   "description": "自己做的鲸鱼娘：待机是分层烘焙的呼吸+飘发+眨眼，其余动作由 AI 视频转序列帧。干活时捧着碗一直吃，干完收碗，点她会挥手/比心。",
-  "version": "1.6.0",
+  "version": "1.6.2",
   "author": "wei125775-lab",
   "license": "MIT",
   "renderer": "frames2d",

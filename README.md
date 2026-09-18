@@ -127,7 +127,9 @@ dsh-pet 把会话事件投影成 phase，**同时也会投影出一句台词**�
 
 ### dsh-pet 升级之后怎么办
 
-补丁会被冲掉。**宠物不会消失** —— 插件里的护栏 `stripWhalePhasesIfUnsupported()` 会在 dsh-pet 读 manifest 之前，先探一下它认不认那几个相位（读主文件里有没有 `"whale-in"` 字面量），不认就把相位键从部署的 manifest 里摘掉，降级成"没有看鲸鱼"的版本，并在日志里喊一声。
+补丁会被冲掉。**宠物不会消失** —— 插件里的 `syncWhalePhases()` 会在 dsh-pet 读 manifest 之前，先探一下它认不认那几个相位（读主文件里有没有 `"whale-in"` 字面量）：不认就把相位键从部署的 manifest 里摘掉，降级成"没有看鲸鱼"的版本，并在日志里喊一声。
+
+**它是双向的** —— 这一点是有意设计的：`releasePet()` 只在包内版本比已装的新时才覆盖，所以"没装 dsh-pet 时先装了本包（相位被摘）→ 之后才装 dsh-pet 并打上补丁"这条路上，被摘掉的相位没人会加回来。`syncWhalePhases()` 检测到补丁在了就把相位补回去，所以**先装哪个都行，不用重装**。
 
 恢复：`node patch-dshpet.mjs`，然后重启 DshDesktop。
 
