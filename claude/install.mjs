@@ -296,10 +296,16 @@ function findPetExe() {
   if (given) {
     const p = resolve(given)
     // 用户明确指定的优先，但路径不存在必须说出来——否则会静默写进 launcher，
-    // 等"开 Claude 她怎么没起来"的时候，没人会想到问题在这儿
+    // 等"开 Claude 她怎么没起来"的时候，没人会想到问题在这儿。
+    //
+    // 而且**不能把这个坏路径写下去**：petpet-launch.mjs 的 findExe() 第一行是
+    // `if (EXE) return existsSync(EXE) ? EXE : ''`——EXE 一旦非空就不再自动探测。
+    // 写个打错的路径进去，等于把她钉死在这里，比不给还糟（不给至少会自己去找）。
     if (!existsSync(p)) {
       warn('--pet-exe 指的路径不存在：' + p)
-      warn('  （照旧往下走，但"开 Claude 自动拉起她"那步不会生效）')
+      warn('  （这次不写进 launcher 了：留空它会自己去桌面/下载等位置找，')
+      warn('   写个错路径反而把自动探测也堵死了）')
+      return undefined
     }
     return p
   }
