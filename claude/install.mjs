@@ -394,6 +394,16 @@ function petpackStamp() {
 }
 
 function installPet() {
+  // 绿色版目录里**没有** petpack（素材由「启动.cmd」负责装），必须在这里就掉头。
+  // 少了这道判断，下面会一路走到"没标记 → 覆盖一次"，把已装好的素材 rmSync 掉，
+  // 再去解一个根本不存在的包；解包失败只是 warn，最后照样打印「完成」——
+  // 宠物就这么静悄悄没了，用户只会觉得"装完反而坏了"。
+  // （2026-09-20 实测复现：跑之前目录里 3 个文件，跑之后整个目录都不在了。）
+  if (!existsSync(PETPACK)) {
+    say('   本目录没有 whalegirl.petpack（绿色版就是这样）——宠物素材归「启动.cmd」管，这里只挂 hook')
+    return
+  }
+
   const dest = join(PETPET_DIR, 'pets', PET_ID)
   const destJson = join(dest, 'pet.json')
   const stampFile = join(dest, '.petpack-stamp')

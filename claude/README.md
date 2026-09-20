@@ -5,11 +5,11 @@
 同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。她跟着你干活：你发消息她捧着碗吃（10% 的轮次换成端中碗拿筷子吃），**你一派子代理她就收碗、低头看脚边的小鲸鱼绕着她转圈**（跑完了鲸鱼沉入水面），这一轮干完收碗（10% 双手合十给你祝福），你按 Esc 打断她，她停下手里的事甩你一个屑表情。
 
 > **不想手动折腾？让 AI 装**：把仓库链接和这句话发给你的 AI ——
-> 「照 `claude/README.md` 把鲸鱼娘桌宠装上。我用的是绿色版（解压出来的 `whalegirl-petpet` 目录），直接跑 `node claude/install.mjs --hooks-only --pet-exe "<绿色版目录>\PetPet.exe"`（先加 `--dry-run` 看一眼），然后按它最后打印的那一步收尾。」
+> 「照 `claude/README.md` 装鲸鱼娘桌宠。我用的是绿色版（解压出来的 `whalegirl-petpet` 目录，里面就带着 `claude\install.mjs`）。先跑一行去掉「来自 Internet」标记、免得双击弹 Windows 拦截框：`powershell -NoProfile -Command "Get-ChildItem '<绿色版目录>' -Recurse -File | Unblock-File"`，再跑 `node "<绿色版目录>\claude\install.mjs" --hooks-only --pet-exe "<绿色版目录>\PetPet.exe"`（先加 `--dry-run` 看一眼），然后按它最后打印的那一步收尾。」
 >
-> **`--pet-exe` 别省**：不给的话，脚本会去桌面快捷方式和几个常见位置猜 PetPet.exe，猜不到就**跳过"开 Claude 自动把她拉起来"那一步**——它不报错，你也不会知道少了什么。**`--hooks-only` 是绿色版专用**：绿色版自带的 viewer 已经打好补丁了，加上它可以省掉一次注定失败的 GitHub 连接。
+> **`--pet-exe` 别省**：不给的话，脚本会去桌面快捷方式和几个常见位置猜 PetPet.exe，猜不到就**跳过"开 Claude 自动把她拉起来"那一步**——它不报错，你也不会知道少了什么。**`--hooks-only` 是绿色版专用**：绿色版自带的 viewer 已经打好补丁了，加上它可以省掉一次注定失败的 GitHub 连接（脚本就在解压出来的包里，整条路完全不碰网络）。
 >
-> 脚本是幂等的：重复跑不会出问题；宠物素材没换过就不动它，换过才覆盖（覆盖前备份 `pet.json`）。
+> 脚本是幂等的：重复跑不会出问题；宠物素材没换过就不动它，换过才覆盖（覆盖前备份 `pet.json`）。绿色版跑 `--hooks-only` 时**不会碰素材**——包里没有 `whalegirl.petpack`，素材归「启动.cmd」管。
 
 跟仓库根目录那套 dsh 版的区别：这是**精灵表 + pet.json v3** 的格式，走 PetPet 框架；dsh 那套是 **frames2d + manifest v2**，走 `@linxin666/dsh-pet` 插件。素材是同一批，动作逻辑也一样，只是打包格式不同。
 

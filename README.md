@@ -39,6 +39,8 @@
 
 **最省事：下 [绿色版](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest)** —— Windows x64，解压后双击 `启动.cmd` 就有她。不用装 Node、不用 clone 源码、不用编译。代价是包大（200MB，整个 Electron 运行时都在里面）。
 
+> ⚠️ **双击时可能弹「Windows 已保护你的电脑」**——点「更多信息」→「仍要运行」即可，不是文件坏了。浏览器下载的 zip 会被打上「来自 Internet」标记，解压时传给里面的文件，Windows 对没签名的程序都会拦这一次。**交给 AI 装的话它可以帮你把这行去掉**（见下面的「给 AI 的一句话」）。
+
 绿色版就是下面「Claude Code 版」预先构建好的成品；想自己构建，或者要用 dsh 版，走这两条：
 
 | 版本 | 给谁用 | 怎么装 |
@@ -52,9 +54,17 @@
 
 两个安装脚本都是**幂等**的：会自己找/下依赖，改配置前先备份，重复跑不会出问题；都能加 `--dry-run` 先看它会改什么。
 
-**给 AI 的一句话**：
+**给 AI 的一句话**（把仓库链接和下面这段一起发给你用的 AI）：
 
-> 「照这个仓库把鲸鱼娘桌宠装上：Claude 版跑 `claude/install.mjs`，dsh 版跑根目录的 `install.mjs`（先 `--dry-run` 看一眼），然后按脚本最后打印的两步收尾。」
+> 「帮我装鲸鱼娘桌宠（<仓库链接>）。
+>
+> **要 Claude Code 那只**：走绿色版 —— 从 `releases/latest` 下 `whalegirl-petpet-win-x64.zip`，解压到一个固定目录（别在压缩包里直接点）。**解压完先跑这行**，去掉「来自 Internet」标记，不然双击会弹 Windows 拦截框：
+> `powershell -NoProfile -Command "Get-ChildItem '<解压目录>' -Recurse -File | Unblock-File"`
+> 然后跑 `<解压目录>\claude\install.mjs --hooks-only --pet-exe "<解压目录>\PetPet.exe"`（先加 `--dry-run` 看一眼）——挂上钩子她才会跟着我干活。脚本在解压出来的包里带着，不用联网。
+>
+> **要 dsh 那只**：跑根目录的 `install.mjs`。
+>
+> 都一样：先 `--dry-run` 看一眼，按脚本最后打印的收尾，做完告诉我一声重启。」
 
 ## 仓库里都有什么
 
