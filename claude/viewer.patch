@@ -50,11 +50,28 @@
 #    lastStateSent（上次发给渲染层的，纯去重）。合用一个会出事——子代理跑完时要清空
 #    lastStateSent 以逼下一轮重发，若它还兼任"文件里存的是什么"，这一清就把记忆一并
 #    抹了，下一轮落到 else 分支会凭空发出一个 idle，她刚看完鲸鱼沉入就被按回待机
+# ⑮ 再修三处会让宠物"点不动"的问题，都在点击/穿透这条链上：
+#    - 穿透态下渲染层收不到 pointermove，能不能点全看主进程喂坐标的节奏，原来是每秒推
+#      一次 → 从"光标进命中区"到"窗口真能收点击"要空出 405~512ms（均值 489ms）。用户
+#      「甩过去就按」正好按在这个空窗里，pointerdown 被系统丢给下面的窗口，只剩 pointerup
+#      回来，又被"拖拽 vs 点击"的距离判定误判成拖拽、静默吞掉。改成主进程 60ms 推一次
+#      光标位置（新通道 pet:cursor），实测均值降到 50ms、典型 30ms
+#    - 点击判定加 downSeen：pointerup 若本次没收到过 pointerdown，就不判拖拽、按点击
+#      处理。按下都没收到说明拖拽本就没开始，拿上一次点击的残值算距离毫无意义
+#    - 拖拽只认左键：右键点开会弹原生菜单，菜单独占鼠标、pointerup 送不回 canvas，
+#      dragging 一直挂着把穿透状态冻住，那几秒里她照样点不动（实测 0.5~5 秒）
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 --- a/viewer/main.js
 +++ b/viewer/main.js
-@@ -7,6 +7,14 @@
+@@ -1,12 +1,20 @@
+ // PetPet 桌宠查看器 - 主进程
+ // Electron 主进程：透明窗口、托盘、IPC 文件读取
+-const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, protocol, net, dialog } = require('electron')
++const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, protocol, net, dialog, powerMonitor } = require('electron')
+ const path = require('path')
+ const fs = require('fs')
+ const { pathToFileURL } = require('url')
  const { importPetDir, importPetZip } = require('./pet-import.cjs')
  const { safePetId, isSafeUnderRoot } = require('./security-utils.cjs')
  
@@ -230,7 +247,7 @@
      return dirs
    } catch (e) {
      return []
-@@ -390,22 +472,50 @@
+@@ -390,22 +472,63 @@
    })
  }
  
@@ -244,6 +261,19 @@
 +  const pt = screen.getCursorScreenPoint()   // DIP 坐标，与渲染层 clientX 同一套
 +  const [wx, wy] = mainWindow.getPosition()
 +  mainWindow.webContents.send('pet:rehit', { x: pt.x - wx, y: pt.y - wy })
++}
++
++// 高频喂光标位置。穿透态的切换全靠主进程喂过去的坐标——穿透时渲染层收不到 mousemove，
++// 只剩每秒的心跳，于是从"光标进命中区"到"窗口真的可点击"要空出平均半秒：用户移过去就按，
++// 按下那一下窗口还是穿透的，pointerdown 被系统按穿透窗口丢掉（2026-09-20 实测 405~512ms，
++// 症状是她画面照动、右键照用、左键怎么点都没反应，看日志是"有 up 没有 down"）。
++// 这一路只喂坐标、不要求渲染层强制重发样式，平时几乎不发 IPC；
++// 强制重发（抗样式失同步）仍归每秒的 nudgeHitTest。
++function pushCursor() {
++  if (!mainWindow || mainWindow.isDestroyed()) return
++  const pt = screen.getCursorScreenPoint()
++  const [wx, wy] = mainWindow.getPosition()
++  mainWindow.webContents.send('pet:cursor', { x: pt.x - wx, y: pt.y - wy })
 +}
 +
  // 窗口尺寸变化（渲染进程请求调整窗口大小）
@@ -284,7 +314,7 @@
  })
  
  // 查询窗口当前位置（拖拽用）
-@@ -541,7 +651,7 @@
+@@ -541,7 +664,7 @@
      width: 300,
      height: 400,
      x,
@@ -293,7 +323,7 @@
      frame: false,
      // P1-8: 日记窗口可拖动、可缩放（此前不可移动不可缩放，挡住内容只能退出重开）
      movable: true,
-@@ -574,7 +684,10 @@
+@@ -574,7 +697,10 @@
  
  // 设置提醒：{ at: ms 时间戳, repeat: 'none'|'daily'|'weekly', text }
  ipcMain.handle('reminder:set', (_evt, spec) => {
@@ -305,7 +335,7 @@
      return { error: '时间无效' }
    }
    const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
-@@ -609,22 +722,117 @@
+@@ -609,24 +735,131 @@
    }
    send('reminder:fire', { id, text: r.text })
    appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
@@ -416,18 +446,35 @@
 +}
 +
  // 每秒检查（桌宠常驻，开销可忽略；避免超长 setTimeout 超 2^31-1ms 溢出问题）
++// 每一步各自 try/catch：nudgeHitTest 排在最后，前面任何一步抛异常都会把它一起跳过，
++// 而它是穿透状态唯一的自愈路径（2026-09-20 用户报"长时间不动就点不动了"）。
  setInterval(() => {
    const now = Date.now()
-   for (const [id, r] of reminders) {
-     if (r.at <= now) fireReminder(id)
-   }
-+  pollExternalState()
-+  pollSubagents()
-+  nudgeHitTest()
+-  for (const [id, r] of reminders) {
+-    if (r.at <= now) fireReminder(id)
+-  }
++  try { for (const [id, r] of reminders) { if (r.at <= now) fireReminder(id) } } catch (e) { console.warn('[PetPet] 提醒轮询出错：', e) }
++  try { pollExternalState() } catch (e) { console.warn('[PetPet] 外部状态轮询出错：', e) }
++  try { pollSubagents() } catch (e) { console.warn('[PetPet] 子代理轮询出错：', e) }
++  try { nudgeHitTest() } catch (e) { console.warn('[PetPet] 穿透重算出错：', e) }
  }, 1000)
  
++// 光标位置的高频喂送，理由见 pushCursor。60ms 是个折中：再快也只是让窗口更早"醒"，收益
++// 远不如多出来的 IPC；再慢用户就又要等那半秒了
++setInterval(() => { try { pushCursor() } catch (e) { console.warn('[PetPet] 光标位置推送出错：', e) } }, 60)
++
++// 系统从睡眠/连接待机唤醒、或解锁之后，窗口的真实样式可能与渲染层的判断背离。
++// 唤醒瞬间就推一次重算，不必等下一秒的心跳（渲染层收到 pet:rehit 会强制同步一次）。
++if (powerMonitor) {
++  for (const ev of ['resume', 'unlock-screen']) {
++    try { powerMonitor.on(ev, () => nudgeHitTest()) } catch (e) { /* 该平台没有这个事件 */ }
++  }
++}
++
  // ---------- 生命周期 ----------
-@@ -635,6 +843,9 @@
+ // 截图测试模式：electron . --screenshot=/tmp/x.png [--action=run]
+ const shotArg = process.argv.find(a => a.startsWith('--screenshot='))
+@@ -635,6 +868,9 @@
  const openReminderArg = process.argv.includes('--open-reminder')
  
  app.whenReady().then(() => {
@@ -490,7 +537,7 @@
    actions: Record<string, PetActionSpec>
    // V2-A: 身份+气质（2026-08-09，可选，缺省=中性，兼容旧包）
    identity?: {
-@@ -69,7 +91,12 @@
+@@ -69,7 +91,13 @@
        appendActivity: (entry: { petId: string; mood: string; text: string }) => void
        openDiary: (petId: string) => void
        onOpenReminder: (cb: () => void) => void
@@ -500,10 +547,11 @@
 +      onOverlay: (cb: (spec: Record<string, number>) => void) => void  // 叠加层数量（当前未启用）
 +      onSubagent: (cb: (n: number) => void) => void  // 子代理数量：>0 看鲸鱼，回到 0 鲸鱼沉入
 +      onRehit: (cb: (p: { x: number; y: number }) => void) => void  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
++      onCursor: (cb: (p: { x: number; y: number }) => void) => void  // 60ms 一次的高频光标位置（穿透态下收不到 mousemove）
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -93,6 +120,7 @@
+@@ -93,6 +121,7 @@
  } catch { /* ignore */ }
  let pingpongDir = 1
  let bubbleTimer: ReturnType<typeof setTimeout> | null = null
@@ -511,7 +559,7 @@
  let randomTimer: ReturnType<typeof setInterval> | null = null
  let transitionTimer: ReturnType<typeof setTimeout> | null = null // 行为链调度（scheduleTransition）
  let reminderBarOn = false
-@@ -101,10 +129,20 @@
+@@ -101,10 +130,20 @@
  let curWinH = 320
  let curWinX = 0
  let curWinY = 0
@@ -532,7 +580,7 @@
  
  // ================= 初始化 =================
  async function init() {
-@@ -114,6 +152,7 @@
+@@ -114,6 +153,7 @@
      resizeTo: window,
      resolution: Math.min(window.devicePixelRatio || 1, 2)
    })
@@ -540,14 +588,33 @@
    document.getElementById('stage')?.replaceWith(app.canvas)
    app.canvas.style.width = '100%'
    app.canvas.style.height = '100%'
-@@ -130,18 +169,29 @@
+@@ -124,33 +164,78 @@
+ 
+   // 拖拽移动窗口
+   let dragging = false
++  let dragMoveCount = 0
++  let lastDragMoveTs = 0
+   let startScreen = { x: 0, y: 0 }
+   let winStart = { x: 0, y: 0 }
+ 
    app.canvas.addEventListener('pointerdown', async (e) => {
++    // 拖拽只认左键。右键点开会弹原生菜单，菜单一出来鼠标就被它独占，后面的 pointerup
++    // 根本送不回 canvas，dragging 就一直挂着——它一挂住 updateMouseIgnore 立刻早退，穿透
++    // 状态跟着冻结，冻在"穿透开"那几秒里她怎么点都没反应（2026-09-20 实测右键必卡，
++    // 靠 e.buttons===0 半秒解开，鼠标不动则要等 5 秒超时）
++    if (e.button !== 0) {
++      console.log(`[点击] down button=${e.button}（非左键，不进入拖拽）`)
++      return
++    }
      dragging = true
++    dragMoveCount = 0
++    lastDragMoveTs = Date.now()
      startScreen = { x: e.screenX, y: e.screenY }
 -    winStart = await window.petAPI.getWindowPosition()
 +    // 先用本地跟踪的坐标兜底：await 期间若已有 pointermove，就不会拿过期基准算偏移；
 +    // 主进程万一返回坏值也留得住有限坐标（NaN 传下去会崩主进程）
 +    winStart = { x: curWinX, y: curWinY }
++    console.log(`[点击] down button=${e.button} client=${Math.round(e.clientX)},${Math.round(e.clientY)}`)
      app.canvas.setPointerCapture(e.pointerId)
 +    try {
 +      const p = await window.petAPI.getWindowPosition()
@@ -565,10 +632,19 @@
 -    curWinX = Math.round(nx)
 -    curWinY = Math.round(ny)
 -    window.petAPI.moveWindow(Math.round(nx), Math.round(ny))
++    // 左键其实早松了却还留着 dragging —— pointerup/pointercancel 丢了。不清掉的话
++    // 穿透状态会冻在这儿，而一旦冻在"穿透开"，点击再也进不来，就自己锁死自己了
++    if (e.buttons === 0) {
++      console.log('[点击] 拖拽中收到 buttons=0 → pointerup 丢失，解除卡死')
++      dragging = false
++      return
++    }
++    lastDragMoveTs = Date.now()
 +    // 坐标守卫：screenX/Y 缺失、或 getWindowPosition 还没 await 落地时会算出 NaN，
 +    // 传到主进程 setPosition 会让原生层抛异常、整个 app 崩掉（2026-09-16）
 +    const nx = Math.round(winStart.x + (e.screenX - startScreen.x))
 +    const ny = Math.round(winStart.y + (e.screenY - startScreen.y))
++    dragMoveCount++
 +    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return
 +    curWinX = nx
 +    curWinY = ny
@@ -576,21 +652,75 @@
    })
  
    app.canvas.addEventListener('pointerup', () => { dragging = false })
-@@ -168,10 +218,10 @@
+-  app.canvas.addEventListener('pointercancel', () => { dragging = false })
++  app.canvas.addEventListener('pointercancel', () => {
++    console.log(`[点击] pointercancel：按下被系统取消了（已 drag#${dragMoveCount}）`)
++    dragging = false
++  })
+ 
+   // 鼠标穿透（借鉴 bitnp）：透明区穿透桌面，宠物区可交互
+   // forward=true 让穿透时仍能收到 mousemove，从而检测鼠标进入宠物区
+   // 方案B：面板/提醒条/菜单打开时，其区域也保持可交互
+   let lastIgnore: boolean | null = null
++  let lastSource = ''
++  let diagTs = 0
++  function boundsText() {
++    if (!sprite) return '无精灵'
++    const b = sprite.getBounds()
++    // 帧号一起记：getBounds() 按当前帧算，帧尺寸不一致时命中区会逐帧跳
++    const fi = (sprite as unknown as { currentFrame?: number }).currentFrame
++    return `${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}x${Math.round(b.height)} 帧=${fi}/${sprite.textures.length}`
++  }
+   function uiRects() {
+     const out: { x: number; y: number; w: number; h: number }[] = []
+     for (const el of [
+@@ -168,14 +253,41 @@
      })
      return out
    }
 -  function updateMouseIgnore(e: PointerEvent) {
-+  function updateMouseIgnore(pos: { clientX: number; clientY: number }) {
-     if (dragging) return // 拖拽中强制交互
+-    if (dragging) return // 拖拽中强制交互
 -    const x = e.clientX
 -    const y = e.clientY
++  // force=true 时无条件重发一次（幂等），用于 pet:rehit：
++  // lastIgnore 只是"上次发出去的值"，不等于窗口当前的真实样式——面板里的
++  // setIgnoreMouseEvents(false)、系统从待机唤醒后样式被重置，都会让两者背离。
++  // 只按"结论变了才发"的守卫，一旦背离就永远纠正不回来：她画面照常在动，
++  // 但你怎么点都点不到（只能重启）。主进程每秒推一次光标位置，这里强制同步兜底。
++  function updateMouseIgnore(pos: { clientX: number; clientY: number }, force = false) {
++    if (dragging) {
++      // force 说明拖拽已经持续到心跳了。真拖拽每秒都在产生 pointermove，长时间一条都没有
++      // 就是 pointerup/pointercancel 丢了、dragging 卡死——穿透从此不再更新，只能重启
++      if (force && Date.now() - lastDragMoveTs > 5000) {
++        console.log(`[穿透] 拖拽已 ${Math.round((Date.now() - lastDragMoveTs) / 1000)}s 无移动 → 判定卡死，强制解除`)
++        dragging = false
++      } else {
++        if (force && Date.now() - diagTs > 3000) {
++          diagTs = Date.now()
++          console.log('[穿透] 心跳被 dragging 拦住——拖拽状态可能卡死')
++        }
++        return
++      }
++    }
 +    const x = pos.clientX
 +    const y = pos.clientY
      const onSprite = sprite ? sprite.getBounds().containsPoint(x, y) : false
      const onUI = uiRects().some(r => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
      const shouldIgnore = !(onSprite || onUI)
-@@ -184,17 +234,44 @@
++    const src = force ? '心跳' : '光标'
+     if (shouldIgnore !== lastIgnore) {
++      console.log(
++        `[穿透] ${shouldIgnore ? '穿透（点穿到下面）' : '可点击'} 源=${src} 上次=${lastSource}` +
++        ` 位置=${Math.round(x)},${Math.round(y)} 命中区=${boundsText()}` +
++        ` 画布=${app.screen.width}x${app.screen.height} 视口=${window.innerWidth}x${window.innerHeight}`
++      )
++      lastSource = src
++    }
++    if (force || shouldIgnore !== lastIgnore) {
+       lastIgnore = shouldIgnore
+       window.petAPI.setIgnoreMouse(shouldIgnore, true)
+     }
+@@ -184,17 +296,61 @@
    document.addEventListener('pointermove', updateMouseIgnore, true)
    // 初始穿透
    setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
@@ -599,25 +729,44 @@
 +  // 这里补算一次（详见 main.js 的 nudgeHitTest）
 +  // 可选调用：这个通道是本地扩展，配旧 preload.cjs（比如只换了 dist 没换 preload）时
 +  // 它是 undefined，直接调会抛出去把 init 整个带崩——宠物就白屏了
-+  window.petAPI.onRehit?.(p => updateMouseIgnore({ clientX: p.x, clientY: p.y }))
++  window.petAPI.onRehit?.(p => updateMouseIgnore({ clientX: p.x, clientY: p.y }, true))
++  // 主进程每 60ms 再喂一次坐标。穿透态下 pointermove 根本到不了渲染层（Electron 的 forward
++  // 在窗口变动后不可靠），只剩每秒的心跳，于是从"光标进命中区"到"窗口真的可点击"要空出平均
++  // 半秒——用户移过去就按，按下时窗口还是穿透的，pointerdown 被系统按穿透窗口丢掉，
++  // 只留 pointerup 送回来（2026-09-20 实测 405~512ms，症状是画面照动、右键照用、左键点不动）。
++  // 这一路只喂坐标，结论没变就不动窗口样式，平时不发 IPC
++  window.petAPI.onCursor?.(p => updateMouseIgnore({ clientX: p.x, clientY: p.y }, false))
  
    // 单击 = 互动气泡（桌宠灵魂：点宠物有反应；2026-08-06 用户明确：单击不占用为功能入口）
    // 功能入口：托盘爪印（红苕日记/提醒/换肤/动作）+ 右键菜单（触控板双指/辅助点按用户）
    let downPos = { x: 0, y: 0 }
++  // 本次按下有没有真的收到 pointerdown。穿透切可点击有滞后，按下若落在滞后期里，
++  // down 会被系统丢给下面的窗口，canvas 只剩 up 收得到
++  let downSeen = false
    let lastPointerUp = 0
+-  app.canvas.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY } })
 +  // 连击计数：短窗内累计，触发比心后清零。不用 dblclick——那个已经绑给 resetZoom 了。
 +  let clickStreak = 0
 +  let lastClickTs = 0
 +  const STREAK_WINDOW = 600
 +  const HEART_AFTER = 4
 +  const HEART_CHANCE = 0.45
-   app.canvas.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY } })
++  app.canvas.addEventListener('pointerdown', (e) => {
++    downPos = { x: e.clientX, y: e.clientY }
++    downSeen = true
++  })
    app.canvas.addEventListener('pointerup', (e) => {
      lastPointerUp = Date.now()
-     if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
+-    if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
      const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
 -    if (dist < 6) showBubbleText() // 单击 = 互动气泡
-+    if (dist >= 6) return // 拖拽移动窗口，不是点击
++    const hadDown = downSeen
++    downSeen = false
++    if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
++    // hadDown 为假说明 down 压根没收到，downPos 还停在上一次点击的残值——拿它算出来的 dist
++    // 是"这次松手的位置到上次点击的位置"，毫无意义，只会把点击误判成拖拽。而且按下都没收到，
++    // 拖拽本来也没开始，这时候按点击处理才是用户的本意（2026-09-20 长按点不动就是这个）
++    if (hadDown && dist >= 6) { console.log(`[点击] 判定为拖拽，不触发互动 dist=${dist.toFixed(1)}`); return }
 +    // 单击 = 互动气泡。距上次互动超过 RETURN_GAP_MS 就当她久没见你——同一句"要摸摸头吗"，
 +    // 隔十分钟没人理之后说出来，意思是不一样的
 +    const since = Date.now() - lastInteractTs
@@ -636,7 +785,7 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -347,6 +424,138 @@
+@@ -347,6 +503,138 @@
    textures[name] = frames
  }
  
@@ -775,7 +924,7 @@
  function updateTitle() {
    if (pet) document.title = `PetPet - ${pet.name}`
  }
-@@ -356,13 +565,13 @@
+@@ -356,13 +644,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -791,7 +940,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -394,13 +603,18 @@
+@@ -394,13 +682,18 @@
      })
    }
  
@@ -813,7 +962,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +640,19 @@
+@@ -426,12 +719,19 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -839,7 +988,7 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +675,32 @@
+@@ -454,14 +754,32 @@
  }
  
  // ================= 气泡 =================
@@ -875,7 +1024,7 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -485,7 +724,16 @@
+@@ -485,7 +803,16 @@
  // ================= 文案数据优先（v3 数据下沉） =================
  // pet.json 的 bubbles / diary / label 优先，代码常量仅作兜底（docs/08 §2.2）
  function bubblePool(): string[] {
@@ -893,7 +1042,7 @@
  }
  
  function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
-@@ -515,6 +763,7 @@
+@@ -515,6 +842,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -901,7 +1050,7 @@
  }
  
  async function submitReminder() {
-@@ -590,12 +839,84 @@
+@@ -590,12 +918,84 @@
        app.ticker.stop()
      }
    })
@@ -986,7 +1135,7 @@
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
  // 有 transitions 则按权重转移（transition 源），否则回 idle（init 源）
-@@ -603,7 +924,11 @@
+@@ -603,7 +1003,11 @@
    if (transitionTimer) { clearTimeout(transitionTimer); transitionTimer = null }
    const act = pet?.actions?.[name]
    if (!act) return
@@ -999,7 +1148,7 @@
    transitionTimer = setTimeout(() => {
      transitionTimer = null
      if (!pet || currentAction !== name) return
-@@ -652,6 +977,9 @@
+@@ -652,6 +1056,9 @@
  // ================= 启动 =================
  // P0-2：可见的错误反馈（不透明卡片，替代透明窗口里的静默失败）
  function showFatal(msg: string) {
@@ -1052,7 +1201,7 @@
    return priorityOf(req.name) > priorityOf(currentAction)
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
-@@ -23,5 +23,10 @@
+@@ -23,5 +23,11 @@
    notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
    openDiary: (petId) => ipcRenderer.send('diary:open', petId),
    onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
@@ -1062,4 +1211,5 @@
 +  onOverlay: (cb) => ipcRenderer.on('pet:overlay', (_e, spec) => cb(spec)),  // 叠加层数量（当前未启用，代码留着以后做道具/特效）
 +  onSubagent: (cb) => ipcRenderer.on('pet:subagent', (_e, n) => cb(n)),  // 子代理数量：>0 她停下看鲸鱼，回到 0 鲸鱼沉入
 +  onRehit: (cb) => ipcRenderer.on('pet:rehit', (_e, p) => cb(p)),  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
++  onCursor: (cb) => ipcRenderer.on('pet:cursor', (_e, p) => cb(p)), // 60ms 一次的光标位置（穿透态下 mousemove 到不了渲染层）
  })
