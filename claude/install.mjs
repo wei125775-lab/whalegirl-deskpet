@@ -4,6 +4,7 @@
  *
  *   node install.mjs                 # 交互最少的一条路：能找到的自动找，找不到就报清楚
  *   node install.mjs --dry-run       # 只打印将要做什么，什么都不改
+ *   node install.mjs --hooks-only    # 只装 hook + 宠物，不碰源码/补丁/构建
  *   node install.mjs --viewer <路径> # 指定 petpet-playbook 源码目录（没给就自动找/克隆）
  *   node install.mjs --pet-exe <路径># 指定 PetPet.exe（写进 SessionStart 钩子，自动拉起用）
  *
@@ -13,7 +14,11 @@
  *   3. 四个 hook 装进 ~/.claude/hooks/，并**合并**进 ~/.claude/settings.json（先备份、只加不改）
  *   4. 把 whalegirl.petpack 解到 ~/.petpet/pets/whalegirl/
  *
- * 幂等：补丁已打过、hook 已挂过、宠物已装过都会跳过；重复跑不会出问题。
+ * **绿色版用户请加 --hooks-only**：绿色版里的 viewer 已经打好补丁，前两步不但白做，
+ * 而且第 1 步要 clone github.com——墙内连不上，只会白等一轮超时再报错。
+ *
+ * 幂等：补丁已打过、hook 已挂过、宠物没换过都会跳过；重复跑不会出问题。
+ * 宠物素材的"换没换"按 petpack 的大小 + mtime 标记判断，换了才覆盖（覆盖前备份 pet.json）。
  * Windows 上也可以直接双击 install.cmd。
  */
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -41,6 +46,8 @@ const flag = (name) => argv.includes('--' + name)
 const DRY = flag('dry-run')
 const SKIP_BUILD = flag('no-build')
 const FORCE = flag('force')
+// 绿色版用户：viewer 已经打好补丁了，源码那三步既没用又会因为 github 连不上白等
+const HOOKS_ONLY = flag('hooks-only')
 const CLAUDE_DIR = opt('claude-home') || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const PETPET_DIR = opt('pet-home') || join(homedir(), '.petpet')
 
@@ -67,7 +74,11 @@ function findViewer() {
   return undefined
 }
 
-/** 本机没有源码时：优先 git clone；没装 git 就退化成直接下 GitHub 的 tar.gz（codeload 可直连） */
+/**
+ * 本机没有源码时：优先 git clone；没装 git 就退化成直接下 GitHub 的 tar.gz。
+ * ⚠️ **两条路都要连 github.com，墙内两条都不通**（codeload.github.com 也是 github 的域名，
+ * 以前这里的注释写着"可直连"，是错的）。墙内请走绿色版 + `--hooks-only`，那条路完全不碰 GitHub。
+ */
 async function obtainViewer() {
   const dest = join(homedir(), 'petpet-playbook')
   const hasGit = (() => {
@@ -123,7 +134,10 @@ async function obtainViewer() {
     return dest
   } catch (e) {
     warn('自动下载失败：' + e.message)
-    warn('请手动下载后重跑，或加 --viewer <路径> 指到已有的源码目录：')
+    warn('（墙内这是常态，不用反复试：git clone 和这个压缩包地址都走 github.com）')
+    warn('在用绿色版的话本来就不需要源码，加 --hooks-only 重跑、别在这儿耗：')
+    warn('     node install.mjs --hooks-only --pet-exe "<绿色版目录>\\PetPet.exe"')
+    warn('确实要走源码，就自己把上游下下来，再用 --viewer <路径> 指过来：')
     warn('     ' + tarball)
     return undefined
   }
@@ -276,10 +290,19 @@ function installHooks() {
   if (added === 0) say('   （之前已经挂过，这次没重复加）')
 }
 
-/** 找你机器上的 PetPet.exe（Windows：先看桌面快捷方式，再看常见安装位置） */
+/** 找你机器上的 PetPet.exe（Windows：先看桌面快捷方式，再扫绿色版最常见的解压位置） */
 function findPetExe() {
   const given = opt('pet-exe')
-  if (given) return resolve(given)
+  if (given) {
+    const p = resolve(given)
+    // 用户明确指定的优先，但路径不存在必须说出来——否则会静默写进 launcher，
+    // 等"开 Claude 她怎么没起来"的时候，没人会想到问题在这儿
+    if (!existsSync(p)) {
+      warn('--pet-exe 指的路径不存在：' + p)
+      warn('  （照旧往下走，但"开 Claude 自动拉起她"那步不会生效）')
+    }
+    return p
+  }
   if (process.platform === 'win32') {
     try {
       const ps = spawnSync('powershell', ['-NoProfile', '-Command',
@@ -288,12 +311,42 @@ function findPetExe() {
       const p = (ps.stdout || '').trim()
       if (p && existsSync(p)) return p
     } catch { /* 拿不到就算 */ }
+
     const guesses = [
       join(homedir(), 'AppData', 'Local', 'Programs', 'PetPet', 'PetPet.exe'),
       'C:/Program Files/PetPet/PetPet.exe',
-      'D:/petpet-playbook/viewer/release/whalegirl-pet/PetPet.exe',
     ]
     for (const g of guesses) if (existsSync(g)) return g
+
+    // 绿色版解压出来是「whalegirl-petpet」这个目录，它摆在哪就在哪——桌面和下载最常见。
+    // **这里以前最后一条写的是开发机上的绝对路径**（D:/petpet-playbook/viewer/release/...），
+    // 别人机器上永远命中不了 → findPetExe 返回 undefined → 写入那步静默跳过 →
+    // launcher 里继续留着开发机的路径，开 Claude 只会白刷一行「exe 不存在」。
+    const bases = [
+      join(homedir(), 'Desktop'),
+      join(homedir(), 'OneDrive', 'Desktop'),
+      join(homedir(), 'Downloads'),
+      process.cwd(),
+      dirname(HERE),
+      HERE,
+    ]
+    const named = ['whalegirl-petpet', 'petpet-playbook', 'PetPet']
+    for (const base of bases) {
+      for (const n of named) {
+        const p = join(base, n, 'PetPet.exe')
+        if (existsSync(p)) return p
+        const q = join(base, n, 'viewer', 'release', 'whalegirl-pet', 'PetPet.exe')
+        if (existsSync(q)) return q
+      }
+      // 解压出来的目录名可能带版本号后缀（whalegirl-petpet-1.1.0 这种），再扫一层
+      try {
+        for (const d of readdirSync(base)) {
+          if (!/^(whalegirl|petpet)/i.test(d)) continue
+          const p = join(base, d, 'PetPet.exe')
+          if (existsSync(p)) return p
+        }
+      } catch { /* 目录不在就算了 */ }
+    }
   }
   return undefined
 }
@@ -301,34 +354,78 @@ function findPetExe() {
 function writePetExeIntoLauncher(exe) {
   const f = join(CLAUDE_DIR, 'hooks', 'petpet-launch.mjs')
   if (DRY) {
-    say(`   [dry-run] 把 ${exe} 写进 petpet-launch.mjs 的 EXE`)
+    say(`   [dry-run] 把 ${exe || '(没找到，跳过)'} 写进 petpet-launch.mjs 的 EXE`)
     return
   }
-  if (!exe || !existsSync(f)) return
+  // 找不到就**说出来**。这里以前第一行是静默 `return`，后果是 launcher 里继续留着上一个人
+  // 写入的路径（早期版本里甚至是开发机的绝对路径），每次开 Claude 都白刷一行日志，
+  // 而用户根本不知道要补 --pet-exe。
+  if (!exe) {
+    warn('没找到 PetPet.exe —— SessionStart 自动拉起那步先跳过（其他部分不受影响）。')
+    warn('  指一下再重跑就行：')
+    warn('    node install.mjs --hooks-only --pet-exe "<解压目录>\\PetPet.exe"')
+    warn('  （不修也能用：自己双击绿色版的「启动.cmd」照样开她，只是开 Claude 时不会自动拉起）')
+    return
+  }
+  if (!existsSync(f)) return
   const s = readFileSync(f, 'utf8')
   const out = s.replace(/const EXE = process\.env\.PETPET_EXE \|\| '[^']*'/, `const EXE = process.env.PETPET_EXE || '${exe.replace(/\\/g, '\\\\')}'`)
   if (out !== s) {
     writeFileSync(f, out)
     ok('已把 PetPet 路径写进 petpet-launch.mjs：' + exe)
+  } else {
+    ok('petpet-launch.mjs 里的路径已经是它了：' + exe)
   }
 }
 
 // ---------------------------------------------------------------- 5. 宠物
+/** 包的身份标记：大小 + mtime。重打过 petpack（哪怕只换一张表）这两样必变 */
+function petpackStamp() {
+  try {
+    const st = statSync(PETPACK)
+    return `${st.size}-${Math.floor(st.mtimeMs)}`
+  } catch { return '' }
+}
+
 function installPet() {
   const dest = join(PETPET_DIR, 'pets', PET_ID)
   const destJson = join(dest, 'pet.json')
+  const stampFile = join(dest, '.petpack-stamp')
+  const stamp = petpackStamp()
+
+  // **判"装过没"不能只看 pet.json 在不在**：那样素材升级永远不会生效——文档说"重跑
+  // install.mjs 就行"，可只要目录在就整步跳过，用户拿到的还是旧素材（启动.cmd 当年同款毛病）。
+  // 改成比对标记：包没换就跳过（顺带尊重你手改过的权重），包换了才覆盖。
   if (existsSync(destJson) && !FORCE) {
-    try {
-      const d = JSON.parse(readFileSync(destJson, 'utf8'))
-      say(`   已装过（${Object.keys(d.actions || {}).length} 个动作），跳过。要覆盖加 --force`)
-      return
-    } catch { /* 坏文件就重装 */ }
+    let installed = ''
+    try { installed = readFileSync(stampFile, 'utf8').trim() } catch { /* 旧版脚本装的，没这个文件 */ }
+    if (installed && installed === stamp) {
+      try {
+        const d = JSON.parse(readFileSync(destJson, 'utf8'))
+        say(`   已是最新（${Object.keys(d.actions || {}).length} 个动作），跳过。要强制重装加 --force`)
+        return
+      } catch { /* 坏文件就重装 */ }
+    }
+    if (!installed) {
+      say('   已装过但没有标记（旧版脚本装的，判断不了素材新旧）——覆盖一次并补上标记')
+    } else {
+      say('   宠物素材有更新，覆盖安装（旧 pet.json 会先备份）')
+    }
   }
   if (DRY) {
-    say(`   [dry-run] 解 ${PETPACK} → ${dest}`)
+    say(`   [dry-run] 解 ${PETPACK} → ${dest}${existsSync(destJson) ? '（覆盖，先备份 pet.json）' : ''}`)
     return
   }
   mkdirSync(join(PETPET_DIR, 'pets'), { recursive: true })
+  // 覆盖前只备份 pet.json —— 素材本身完全来自包，没有信息损失，会被手改的只有 pet.json。
+  // 备份放在 dest **外面**：下一步 rmSync 会把 dest 整个删掉。
+  const bak = join(PETPET_DIR, `pet.json.bak-${PET_ID}-${Date.now()}`)
+  try {
+    if (existsSync(destJson)) {
+      cpSync(destJson, bak)
+      say('   （旧的 pet.json 已备份到 ' + bak + '）')
+    }
+  } catch { /* 备份失败不拦着装 */ }
   rmSync(dest, { recursive: true, force: true })
   // 解 zip 只能靠系统 tar：Node 没有内置 zip 解析，而 PATH 上的 tar 在 Windows 上
   // 往往是 git bash 的 GNU tar——它认不出 "D:/..." 这种盘符路径（报 Cannot connect to D:），
@@ -347,6 +444,7 @@ function installPet() {
     warn('自动解包失败。请手动来：PetPet 托盘菜单 → 导入宠物包 → 选 claude/whalegirl.petpack')
     return
   }
+  try { writeFileSync(stampFile, stamp) } catch { /* 写不上就算了，下次会再覆盖一遍 */ }
   ok('宠物已装到 ' + dest)
 }
 
@@ -356,41 +454,48 @@ async function main() {
   say('  claude 配置目录: ' + CLAUDE_DIR)
   say('  petpet 数据目录: ' + PETPET_DIR)
 
-  step('1/4 找 petpet-playbook 源码')
-  let root = findViewer()
-  if (!root) root = await obtainViewer()
-  if (!root) {
-    warn('没找到源码，后面的补丁和构建都做不了。')
-    warn('（只有宠物包和 hook 能装——但它们需要打过补丁的 viewer 才有完整效果）')
+  let root
+  if (HOOKS_ONLY) {
+    step('1-3/4 找源码 / 打补丁 / 构建 —— 已按 --hooks-only 跳过')
+    say('   绿色版里的 viewer 已经打好补丁，这三步不用做，也不用碰 GitHub。')
   } else {
-    ok('源码目录：' + root)
-  }
-
-  if (root) {
-    step('2/4 打 viewer 补丁')
-    if (!existsSync(PATCH)) {
-      warn('找不到 ' + PATCH)
-    } else if (alreadyPatched(root)) {
-      ok('看起来已经打过补丁了（函数名对得上），跳过。要强制重打加 --force')
-    } else if (DRY) {
-      say('   [dry-run] 打补丁 ' + PATCH + ' → ' + root)
+    step('1/4 找 petpet-playbook 源码')
+    root = findViewer()
+    if (!root) root = await obtainViewer()
+    if (!root) {
+      warn('没找到源码，后面的补丁和构建都做不了。')
+      warn('（只有宠物包和 hook 能装——但它们需要打过补丁的 viewer 才有完整效果）')
+      warn('用绿色版的话本来就不需要源码：加 --hooks-only 重跑，直接跳过这三步。')
     } else {
-      try {
-        const n = applyPatch(readFileSync(PATCH, 'utf8'), root)
-        ok(`补丁已应用（${n} 个文件）`)
-      } catch (e) {
-        warn('打不上：' + e.message)
-        warn('上游版本大概比 v1.3.0 新。手工合并的思路写在 viewer.patch 头部。')
-      }
+      ok('源码目录：' + root)
     }
 
-    step('3/4 构建 viewer')
-    if (SKIP_BUILD) {
-      say('   （--no-build，跳过）')
-    } else if (DRY) {
-      say('   [dry-run] cd ' + join(root, 'viewer') + ' && npm install && npm run build')
-    } else {
-      buildViewer(root)
+    if (root) {
+      step('2/4 打 viewer 补丁')
+      if (!existsSync(PATCH)) {
+        warn('找不到 ' + PATCH)
+      } else if (alreadyPatched(root)) {
+        ok('看起来已经打过补丁了（函数名对得上），跳过。要强制重打加 --force')
+      } else if (DRY) {
+        say('   [dry-run] 打补丁 ' + PATCH + ' → ' + root)
+      } else {
+        try {
+          const n = applyPatch(readFileSync(PATCH, 'utf8'), root)
+          ok(`补丁已应用（${n} 个文件）`)
+        } catch (e) {
+          warn('打不上：' + e.message)
+          warn('上游版本大概比 v1.3.0 新。手工合并的思路写在 viewer.patch 头部。')
+        }
+      }
+
+      step('3/4 构建 viewer')
+      if (SKIP_BUILD) {
+        say('   （--no-build，跳过）')
+      } else if (DRY) {
+        say('   [dry-run] cd ' + join(root, 'viewer') + ' && npm install && npm run build')
+      } else {
+        buildViewer(root)
+      }
     }
   }
 
@@ -399,12 +504,19 @@ async function main() {
   writePetExeIntoLauncher(findPetExe())
   installPet()
 
-  say('\n完成。还差两步：')
-  say('  1. 让打过补丁的 viewer 跑起来：')
-  say('     · 图省事：cd ' + (root ? join(root, 'viewer') : '<petpet-playbook>/viewer') + ' && npm run dev')
-  say('     · 想常驻：把 viewer/dist/ 覆盖进你那份 PetPet 应用的 resources/app/dist/（先删旧的），或自己 electron-builder 打包')
-  say('  2. 重启 Claude Code（让 SessionStart 钩子生效）——之后开 Claude 她就会自己起来')
-  say('     宠物也能在 PetPet 托盘菜单里手动切成「中口吃 / 屑表情 / 祝福 / 看鲸鱼」等动作先看看')
+  say('\n完成。')
+  if (HOOKS_ONLY) {
+    say('还差一步：重启 Claude Code（让 SessionStart 钩子生效）——之后开 Claude 她就会自己起来。')
+    say('  绿色版没在跑的话，双击解压目录里的「启动.cmd」开她。')
+    say('  托盘菜单里能手动切成「中口吃 / 屑表情 / 祝福 / 看鲸鱼」等动作先看看。')
+  } else {
+    say('还差两步：')
+    say('  1. 让打过补丁的 viewer 跑起来：')
+    say('     · 图省事：cd ' + (root ? join(root, 'viewer') : '<petpet-playbook>/viewer') + ' && npm run dev')
+    say('     · 想常驻：把 viewer/dist/ 覆盖进你那份 PetPet 应用的 resources/app/dist/（先删旧的），或自己 electron-builder 打包')
+    say('  2. 重启 Claude Code（让 SessionStart 钩子生效）——之后开 Claude 她就会自己起来')
+    say('     宠物也能在 PetPet 托盘菜单里手动切成「中口吃 / 屑表情 / 祝福 / 看鲸鱼」等动作先看看')
+  }
 }
 
 try {

@@ -5,14 +5,29 @@
 同一个鲸鱼娘的 [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 版本——挂在 Claude Code 桌面上的那只。她跟着你干活：你发消息她捧着碗吃（10% 的轮次换成端中碗拿筷子吃），**你一派子代理她就收碗、低头看脚边的小鲸鱼绕着她转圈**（跑完了鲸鱼沉入水面），这一轮干完收碗（10% 双手合十给你祝福），你按 Esc 打断她，她停下手里的事甩你一个屑表情。
 
 > **不想手动折腾？让 AI 装**：把仓库链接和这句话发给你的 AI ——
-> 「照 `claude/README.md` 把鲸鱼娘桌宠装上，直接跑 `node claude/install.mjs`（先 `--dry-run` 看一眼），然后按它最后打印的两步收尾。」
-> 脚本是幂等的，重复跑不会出问题。
+> 「照 `claude/README.md` 把鲸鱼娘桌宠装上。我用的是绿色版（解压出来的 `whalegirl-petpet` 目录），直接跑 `node claude/install.mjs --hooks-only --pet-exe "<绿色版目录>\PetPet.exe"`（先加 `--dry-run` 看一眼），然后按它最后打印的那一步收尾。」
+>
+> **`--pet-exe` 别省**：不给的话，脚本会去桌面快捷方式和几个常见位置猜 PetPet.exe，猜不到就**跳过"开 Claude 自动把她拉起来"那一步**——它不报错，你也不会知道少了什么。**`--hooks-only` 是绿色版专用**：绿色版自带的 viewer 已经打好补丁了，加上它可以省掉一次注定失败的 GitHub 连接。
+>
+> 脚本是幂等的：重复跑不会出问题；宠物素材没换过就不动它，换过才覆盖（覆盖前备份 `pet.json`）。
 
 跟仓库根目录那套 dsh 版的区别：这是**精灵表 + pet.json v3** 的格式，走 PetPet 框架；dsh 那套是 **frames2d + manifest v2**，走 `@linxin666/dsh-pet` 插件。素材是同一批，动作逻辑也一样，只是打包格式不同。
 
 ---
 
 ## 装
+
+> ### 墙内（连不上 GitHub），或者你下的是绿色版 → 走这条
+>
+> ```bash
+> node install.mjs --hooks-only --pet-exe "<解压目录>\PetPet.exe"
+> ```
+>
+> `--hooks-only` 跳过「找源码 → 打补丁 → npm build」那三步。绿色版里的 viewer **已经打好补丁了**，那三步不但白做，第 1 步还要 clone `github.com`——墙内**必然失败**，脚本会白等一轮超时才报错，然后你多半会以为"这脚本坏了"。
+>
+> `--pet-exe` 指到绿色版解压目录下的 `PetPet.exe`，写进 SessionStart 钩子用来自动拉起她。**这条路完全不碰 GitHub**，也不需要本机有 petpet-playbook 源码。
+>
+> 不用绿色版、要自己从源码 build 的，看下面。
 
 一条命令（Windows 上也可以直接双击 `install.cmd`）：
 
@@ -21,14 +36,14 @@ node install.mjs             # 装
 node install.mjs --dry-run   # 先看它会改什么，什么都不动
 ```
 
-它依次做完这四件事，**幂等**，重复跑没有副作用：
+它依次做完这四件事，**幂等**——补丁已打过、hook 已挂过都会跳过，重复跑没有副作用（宠物素材换过了才会覆盖更新，且覆盖前自动备份旧的 `pet.json`）：
 
 1. 找到（本机找不到就 clone）petpet-playbook 源码
 2. 把 `viewer.patch` 打上去（内置 diff 应用器，不强依赖 git，能容忍行尾 CRLF/LF 差异）
 3. 在 viewer 里 `npm install && npm run build`
 4. 四个 hook 放进 `~/.claude/hooks/`、**合并**进 `~/.claude/settings.json`（先备份、只加不改、不覆盖你原有配置）；再把 `whalegirl.petpack` 解到 `~/.petpet/pets/whalegirl/`
 
-常用参数：`--viewer <源码路径>`、`--pet-exe <PetPet.exe 路径>`（写进 SessionStart 钩子，开 Claude 自动拉起她）、`--no-build`、`--force`。
+常用参数：`--hooks-only`（只装 hook + 宠物，跳过源码那三步——**绿色版用户加这个**）、`--viewer <源码路径>`、`--pet-exe <PetPet.exe 路径>`（写进 SessionStart 钩子，开 Claude 自动拉起她）、`--no-build`、`--force`。
 
 跑完还剩两步（脚本结尾会打印）：
 

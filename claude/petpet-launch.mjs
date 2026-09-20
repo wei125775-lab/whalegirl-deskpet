@@ -15,13 +15,41 @@
 // 已知没兜住的：同时开两个 Claude 窗口时，两个钩子可能都还没看到宠物就各拉一次
 // （要治只能给 PetPet 加单实例锁），概率极低，且右键退出多余的即可。
 import { execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, existsSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// 换位置了改这里，或临时用环境变量 PETPET_EXE 指过去
-const EXE = process.env.PETPET_EXE || 'D:\\petpet-playbook\\viewer\\release\\whalegirl-pet\\PetPet.exe'
+// 换位置了改这里，或临时用环境变量 PETPET_EXE 指过去。
+// 默认留空 → findExe() 自动去常见位置找。**这里以前写死的是开发机上的绝对路径**，
+// 别人拿到这个包，装完 hook 每次开 Claude 都只会得到一行"exe 不存在"。
+const EXE = process.env.PETPET_EXE || ''
+
+/** 没显式配置时的兜底探测：绿色版解压出来最常见的落点是桌面/下载目录 */
+const findExe = () => {
+  if (EXE) return existsSync(EXE) ? EXE : ''
+  const home = homedir()
+  for (const base of [join(home, 'Desktop'), join(home, 'OneDrive', 'Desktop'), join(home, 'Downloads')]) {
+    for (const p of [join(base, 'whalegirl-petpet', 'PetPet.exe'), join(base, 'PetPet', 'PetPet.exe')]) {
+      if (existsSync(p)) return p
+    }
+    // 解压出来的目录名可能带版本号后缀（whalegirl-petpet-1.1.0 这种），再扫一层。
+    // 桌面/下载里条目不多，这点开销比"静默找不到"划算。
+    try {
+      for (const d of readdirSync(base)) {
+        const p = join(base, d, 'PetPet.exe')
+        if (existsSync(p)) return p
+      }
+    } catch { /* 目录不存在就算了 */ }
+  }
+  for (const p of [
+    join(home, 'AppData', 'Local', 'Programs', 'PetPet', 'PetPet.exe'),
+    'C:/Program Files/PetPet/PetPet.exe',
+  ]) {
+    if (existsSync(p)) return p
+  }
+  return ''
+}
 const WATCH = join(dirname(fileURLToPath(import.meta.url)), 'interrupt-watch.mjs')
 const PET_DIR = join(homedir(), '.petpet')
 const LOG = join(PET_DIR, 'launch.log')
@@ -59,16 +87,18 @@ if (existsSync(WATCH)) {
   }
 }
 
+const exe = findExe()
+
 if (running()) {
   log('已在运行，跳过')
-} else if (!existsSync(EXE)) {
-  log(`exe 不存在，跳过启动：${EXE}`)
+} else if (!exe) {
+  log('找不到 PetPet.exe，跳过启动。用 PETPET_EXE 环境变量指定，或改本文件顶部的 EXE')
 } else {
   try {
-    const child = spawn(EXE, [], {
+    const child = spawn(exe, [], {
       detached: true,
       stdio: 'ignore',
-      cwd: join(EXE, '..'),
+      cwd: join(exe, '..'),
     })
     child.on('error', (e) => log(`启动出错：${e.message}`))
     // spawn 是异步的：失败时也能拿到 child 对象，pid 却是 undefined，
