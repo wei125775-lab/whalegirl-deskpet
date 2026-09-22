@@ -95,7 +95,7 @@ docs/preview/   README 用的预览图
 
 然后**重启 DshDesktop**。插件本身不注册任何东西，只在启动时把包内的 `pet/` 释放到 `<DSH_HOME>/pets/whalegirl-hd/` —— dsh-pet 的 `frames2d` 宠物只能从那个目录扫出来（它内联 manifest 的通道只认 v1 sprite2d 精灵表，喂 frames2d 进去会静默降级，而 sprite2d 只有固定 9 个 Codex 动画名，装不下这些自定义动作）。
 
-释放是幂等的：目标目录的 `pet.json` 版本号和包内一致就跳过。想强制覆盖，先把 `<DSH_HOME>/pets/whalegirl-hd/` 删掉再重启。**宠物没出现就再重启一次**——插件释放和 dsh-pet 扫目录都发生在启动期间，安装脚本已经把 bundle 排在 `@linxin666/dsh-pet` 前面，但万一顺序还是反了，第二次必然正确。
+释放是幂等的：目标目录的内容和包内一致就跳过。比的是**内容**不是版本号——改了 `pet/` 里的任何东西（素材、`pet.json`、`voice.json`）都不用手动删目录，下次启动发现对不上就会重建；部署目录被拷坏（缺帧、拷到一半）也是同样处理，会自己修好。想强制覆盖就删掉 `<DSH_HOME>/pets/whalegirl-hd/` 再重启。**宠物没出现就再重启一次**——插件释放和 dsh-pet 扫目录都发生在启动期间，安装脚本已经把 bundle 排在 `@linxin666/dsh-pet` 前面，但万一顺序还是反了，第二次必然正确。
 
 卸：删掉上面那三处（`node_modules` 里的包、profile `package.json` 的条目、`<DSH_HOME>/pets/whalegirl-hd/`）。
 

@@ -13,9 +13,9 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PKG_NAME = '@wei125775-lab/whalegirl-deskpet'
@@ -209,21 +209,49 @@ if (!hasRenderer && !skipRenderer) {
   console.log('renderer   : ' + (hasRenderer ? 'installed OK' : 'auto-install did not succeed — see the manual steps at the end'))
 }
 
-// 2. Copy the package (drop any previous copy first so stale frames cannot linger).
-if (existsSync(installedAt)) rmSync(installedAt, { recursive: true, force: true })
+// 2. Copy the package, staging first: the old code deleted the installed copy up
+// front, so a failure part-way through left nothing behind (or half a tree) and the
+// script still printed "copied". Swapping in a finished stage keeps the installed
+// copy intact until the new one is complete.
 mkdirSync(dirname(installedAt), { recursive: true })
+const stage = join(dirname(installedAt), '.' + basename(installedAt) + '.stage-' + process.pid)
+const trash = join(dirname(installedAt), '.' + basename(installedAt) + '.old-' + process.pid)
+rmSync(stage, { recursive: true, force: true })
+rmSync(trash, { recursive: true, force: true })
 // `src` arrives as a full path, so the test has to be relative to `here`. With the old
 // src.includes('node_modules') form, a source tree that itself sat under some
 // node_modules had its own root rejected -- and when cpSync rejects the root it says
 // nothing, creates nothing and copies nothing, while the script carries on and prints
 // "copied" as if it had worked.
-cpSync(here, installedAt, {
+cpSync(here, stage, {
   recursive: true,
   filter: (src) => {
     const parts = relative(here, src).split(sep)
     return !parts.includes('node_modules') && !parts.includes('.git')
   },
 })
+
+let hadOld = false
+try {
+  // A lock on the installed copy (antivirus, a running dsh) can make the rename fail,
+  // so the old tree goes back rather than leaving the profile without the plugin.
+  if (existsSync(installedAt)) {
+    renameSync(installedAt, trash)
+    hadOld = true
+  }
+  renameSync(stage, installedAt)
+} catch (error) {
+  if (hadOld) {
+    try { renameSync(trash, installedAt) } catch { /* the message below covers it */ }
+  }
+  rmSync(stage, { recursive: true, force: true })
+  fail('could not swap in the new copy: ' + error.message + '\n' +
+    'The previous copy is ' + (hadOld ? 'back in place' : 'untouched') + '.')
+}
+if (hadOld) {
+  try { rmSync(trash, { recursive: true, force: true }) }
+  catch { console.log('note       : old copy left at ' + trash + ' (safe to delete)') }
+}
 console.log('copied     : -> ' + installedAt)
 
 // 3. Wire it into the profile manifest, keeping a backup of the previous one.
