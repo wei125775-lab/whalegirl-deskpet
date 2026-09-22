@@ -22,7 +22,7 @@
  * Windows 上也可以直接双击 install.cmd。
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -168,7 +168,10 @@ function applyPatch(patchText, rootDir) {
     }
   }
 
-  let changed = 0
+  // 全部在内存里改完再落盘。逐文件写的话，第二个文件对不上上下文时第一个已经写进去了，
+  // 源码树留在"打了一半"的状态：后面 buildViewer 会拿这棵混合的树照样构建成功、照样
+  // 打印"完成"，装出来的是新代码和旧代码拼接的产物，而且没人会发现。
+  const pending = []
   for (const f of files) {
     const abs = join(rootDir, f.path)
     if (!existsSync(abs)) throw new Error('补丁里的文件不存在：' + f.path)
@@ -195,10 +198,10 @@ function applyPatch(patchText, rootDir) {
       cursor = at + before.length
     }
     out.push(...src.slice(cursor))
-    writeFileSync(abs, out.join(eol))
-    changed += 1
+    pending.push([abs, out.join(eol)])
   }
-  return changed
+  for (const [abs, text] of pending) writeFileSync(abs, text)
+  return pending.length
 }
 
 // 补丁指纹：每个文件各查一个"只有最新补丁才有"的特征。
@@ -206,10 +209,10 @@ function applyPatch(patchText, rootDir) {
 // **必须是这种跨文件的 AND，不能写成"任一关键词命中"**。原来那版用一个正则测三个文件、
 // 命中一个就算打过，于是装过旧版补丁的机器会被判定为"已打全"而整步跳过，永远拿不到
 // 后续补上的修复。现在 main.js 里没有 requestSingleInstanceLock 就说明是旧补丁，
-// 会走重打——打不上时 applyPatch 会明确报错（上下文对不上），比静默跳过强。
+// 会走重打——打不上时 applyPatch 会报出对不上的行，安装随即中断（exit 1）。
 const PATCH_MARKERS = [
   ['viewer/main.js', 'requestSingleInstanceLock'],       // 2026-09-18 加的单实例锁
-  ['viewer/src/main.ts', 'pickWorkAction'],              // 干活时挑哪碗饭
+  ['viewer/src/main.ts', 'canTrip'],                     // 连点摔倒（2026-09-21）
   ['viewer/src/state-priority.ts', 'interrupted'],       // 打断检测那一档
 ]
 
@@ -250,9 +253,19 @@ function installHooks() {
 
   const settingsPath = join(CLAUDE_DIR, 'settings.json')
   let settings = {}
+  // settings.json 带 UTF-8 BOM 时 JSON.parse 会直接抛错（PowerShell 的 `Set-Content -Encoding UTF8`
+  // 就会写出 BOM，用编辑器另存为也可能带上）。原来那句 catch 只是 warn 后 return——四个 hook
+  // 一个都挂不上，脚本却照样打印「完成」，看上去像是她的问题。BOM 只是合法的前缀噪声，剥掉再解，
+  // 写回时按原样带上，别改人家的文件格式（不带 BOM 的机器上不许凭空多出一个）。
+  let bom = ''
   if (existsSync(settingsPath)) {
+    let raw = readFileSync(settingsPath, 'utf8')
+    if (raw.charCodeAt(0) === 0xfeff) {
+      bom = '\ufeff'
+      raw = raw.slice(1)
+    }
     try {
-      settings = JSON.parse(readFileSync(settingsPath, 'utf8'))
+      settings = JSON.parse(raw)
     } catch (e) {
       warn('settings.json 不是合法 JSON，不敢动它：' + e.message)
       return
@@ -274,10 +287,16 @@ function installHooks() {
     ['SubagentStop', node('petpet-subagent.mjs')],
   ]
   let added = 0
+  // 判重必须拿**整条命令串**比。原来取的是 `command.split(' ')[1]`，也就是"第二个空格分段"，
+  // 本意是抠出脚本路径、避开 node 的引号——可 CLAUDE_DIR 带空格时（用户名里有空格）命令本身就
+  // 引号化了，截出来的只是一段前缀，含义随环境漂移：可能把没挂过的当成挂过、静默跳过不装。
+  // 路径/大小写在不同机器上必然有差异，所以两边都按正斜杠 + 小写归一化再比。
+  const norm = (s) => String(s ?? '').replace(/\\/g, '/').toLowerCase()
   for (const [event, command] of wanted) {
     const list = hooks[event] ?? (hooks[event] = [])
-    const has = JSON.stringify(list).includes(command.split(' ')[1].replace(/"/g, ''))
-    if (has && !FORCE) continue
+    const cmds = (Array.isArray(list) ? list : []).flatMap((g) =>
+      (g && Array.isArray(g.hooks) ? g.hooks : []).map((h) => norm(h && h.command)))
+    if (cmds.includes(norm(command)) && !FORCE) continue
     list.push({ hooks: [{ type: 'command', command }] })
     added += 1
   }
@@ -285,9 +304,8 @@ function installHooks() {
     ok('settings.json 里这些 hook 都已在，没动它（重复跑不会堆备份）')
     return
   }
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+  writeFileSync(settingsPath, bom + JSON.stringify(settings, null, 2) + '\n')
   ok(`settings.json 已更新（新增 ${added} 个 hook，原内容保留，备份在同目录 .bak-whalegirl-*）`)
-  if (added === 0) say('   （之前已经挂过，这次没重复加）')
 }
 
 /** 找你机器上的 PetPet.exe（Windows：先看桌面快捷方式，再扫绿色版最常见的解压位置） */
@@ -375,6 +393,14 @@ function writePetExeIntoLauncher(exe) {
   }
   if (!existsSync(f)) return
   const s = readFileSync(f, 'utf8')
+  // 先分开"没找到那行"和"值本来就一样"两种情况：原来 out === s 一律报「已经是它了」，
+  // 可正则没匹配上时也是 out === s —— 文件被人改过格式就走到这里，然后谎报一句成功，
+  // 而自动拉起其实一直是坏的（开 Claude 她不出现，谁也不会去翻 launcher）。
+  if (!/const EXE = process\.env\.PETPET_EXE \|\| '[^']*'/.test(s)) {
+    warn('petpet-launch.mjs 里没找到可替换的 EXE 行（文件被改过？），没动它。')
+    warn('  要自动拉起的话，手工把路径填进那句 const EXE 里：' + exe)
+    return
+  }
   const out = s.replace(/const EXE = process\.env\.PETPET_EXE \|\| '[^']*'/, `const EXE = process.env.PETPET_EXE || '${exe.replace(/\\/g, '\\\\')}'`)
   if (out !== s) {
     writeFileSync(f, out)
@@ -434,7 +460,7 @@ function installPet() {
   }
   mkdirSync(join(PETPET_DIR, 'pets'), { recursive: true })
   // 覆盖前只备份 pet.json —— 素材本身完全来自包，没有信息损失，会被手改的只有 pet.json。
-  // 备份放在 dest **外面**：下一步 rmSync 会把 dest 整个删掉。
+  // 备份放在 dest **外面**：下一步会把 dest 整个换成解出来的新目录。
   const bak = join(PETPET_DIR, `pet.json.bak-${PET_ID}-${Date.now()}`)
   try {
     if (existsSync(destJson)) {
@@ -442,24 +468,67 @@ function installPet() {
       say('   （旧的 pet.json 已备份到 ' + bak + '）')
     }
   } catch { /* 备份失败不拦着装 */ }
-  rmSync(dest, { recursive: true, force: true })
+  // 先解到旁边一个临时目录，成了再顶替——**不能先把 dest 删了再解**。
+  // 原来就是先 rmSync(dest) 再解包：tar 失败（没装/是 GNU tar/包下载不全）时旧的素材已经删了，
+  // 只留一句 warn，用户手里连一份能用的都没有。绿色版用户尤其致命——素材是「启动.cmd」装好的，
+  // 在这儿一删就再没有第二份来源了。
   // 解 zip 只能靠系统 tar：Node 没有内置 zip 解析，而 PATH 上的 tar 在 Windows 上
   // 往往是 git bash 的 GNU tar——它认不出 "D:/..." 这种盘符路径（报 Cannot connect to D:），
   // 也不支持 zip。必须点名用 Windows 自带的 bsdtar。
   const tarCandidates = process.platform === 'win32'
     ? ['C:/Windows/System32/tar.exe', 'tar']
     : ['tar']
-  let done = false
-  for (const bin of tarCandidates) {
-    try {
-      const r = spawnSync(bin, ['-xf', PETPACK, '-C', join(PETPET_DIR, 'pets')], { stdio: 'inherit' })
-      if (r.status === 0 && existsSync(destJson)) { done = true; break }
-    } catch { /* 换下一个 */ }
+  const stage = join(PETPET_DIR, '.petpack-stage-' + Date.now())
+  // 返回"含 pet.json 的那一层"的绝对路径；解包或定位失败返回 undefined。
+  // 口径与 viewer 的 pet-import 一致：顶层就有 pet.json 就是包根，否则在单层子目录里找。
+  const extractTo = (dir) => {
+    for (const bin of tarCandidates) {
+      try {
+        spawnSync(bin, ['-xf', PETPACK, '-C', dir], { stdio: 'inherit' })
+        if (existsSync(join(dir, 'pet.json'))) return dir
+        for (const name of readdirSync(dir)) {
+          const sub = join(dir, name)
+          try {
+            if (statSync(sub).isDirectory() && existsSync(join(sub, 'pet.json'))) return sub
+          } catch { /* 坏条目跳过 */ }
+        }
+      } catch { /* 换下一个 */ }
+    }
+    return undefined
   }
-  if (!done) {
-    warn('自动解包失败。请手动来：PetPet 托盘菜单 → 导入宠物包 → 选 claude/whalegirl.petpack')
+  let staged
+  try {
+    mkdirSync(stage, { recursive: true })
+    staged = extractTo(stage)
+  } catch (e) {
+    warn('解包时出错：' + e.message)
+  }
+  if (staged === undefined) {
+    rmSync(stage, { recursive: true, force: true })
+    warn('自动解包失败——**你原来那份一点没动**，还照旧能用。也可以手动来：')
+    warn('  PetPet 托盘菜单 → 导入宠物包 → 选 claude/whalegirl.petpack')
     return
   }
+  // 顶替：旧的先让位，新的搬进来，最后才删旧的。中间任何一步出错都把旧的搬回去。
+  // 让位目录放在 pets/ **外面**并带前导点：万一崩在两次 rename 中间，pets/ 里也不会多出一个
+  // 带 pet.json 的目录被 PetPet 当成第二只宠物扫出来。
+  const trash = join(PETPET_DIR, '.' + PET_ID + '.old-' + Date.now())
+  let swapped = false
+  try {
+    mkdirSync(join(PETPET_DIR, 'pets'), { recursive: true })
+    if (existsSync(dest)) renameSync(dest, trash)
+    renameSync(staged, dest)
+    swapped = true
+  } catch (e) {
+    warn('替换素材时出错：' + e.message)
+    if (!existsSync(dest) && existsSync(trash)) {
+      try { renameSync(trash, dest) } catch { /* 尽力，实在不行也没删掉过东西 */ }
+    }
+  } finally {
+    rmSync(stage, { recursive: true, force: true })
+    if (swapped) rmSync(trash, { recursive: true, force: true })
+  }
+  if (!swapped) return
   try { writeFileSync(stampFile, stamp) } catch { /* 写不上就算了，下次会再覆盖一遍 */ }
   ok('宠物已装到 ' + dest)
 }
@@ -489,7 +558,11 @@ async function main() {
     if (root) {
       step('2/4 打 viewer 补丁')
       if (!existsSync(PATCH)) {
-        warn('找不到 ' + PATCH)
+        say('')
+        warn('找不到补丁文件：' + PATCH)
+        say('   这个包本该自带它。缺文件说明下载或解压漏了东西，请重新拿一份完整包。')
+        say('   绿色版用户加 --hooks-only 可以完全跳过这一步。')
+        process.exit(1)
       } else if (alreadyPatched(root)) {
         ok('看起来已经打过补丁了（函数名对得上），跳过。要强制重打加 --force')
       } else if (DRY) {
@@ -499,8 +572,24 @@ async function main() {
           const n = applyPatch(readFileSync(PATCH, 'utf8'), root)
           ok(`补丁已应用（${n} 个文件）`)
         } catch (e) {
+          // 必须停在这里，不能警告一声接着往下走。往下走的话，下一步照样 npm build 成功、
+          // 最后照样打印「完成」——装出来的是没打补丁的 viewer，用户重启后一切正常，只是
+          // 干活联动、打断反应、连点摔倒统统不在，且没有任何迹象说明为什么。
+          say('')
           warn('打不上：' + e.message)
-          warn('上游版本大概比 v1.3.0 新。手工合并的思路写在 viewer.patch 头部。')
+          say('   补丁没有被部分应用：要么全部打上，要么一个文件都没动。')
+          say('')
+          say('   这个补丁是对 ' + UPSTREAM_TAG + ' 生成的。两种常见原因：')
+          say('     · 源码不是 ' + UPSTREAM_TAG + '（更新或更旧）')
+          say('     · 之前装过旧版补丁，旧改动还在，上下文对不上')
+          say('   两种情况都用一份干净源码重来：')
+          say('')
+          say('     git clone --branch ' + UPSTREAM_TAG + ' ' + UPSTREAM + ' <目录>')
+          say('     node install.mjs --viewer <目录>')
+          say('')
+          say('   想手工合并：思路写在 viewer.patch 头部。')
+          say('   绿色版用户不需要这一步：加 --hooks-only 重跑即可。')
+          process.exit(1)
         }
       }
 

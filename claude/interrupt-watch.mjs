@@ -80,7 +80,7 @@ function interruptIds(lines) {
 }
 
 const seen = new Set()
-const hot = new Map()          // path -> mtimeMs
+const hot = new Map()          // path -> 上次**读过**时的 mtimeMs（不是文件当前 mtime）
 let lastFullScan = 0
 
 function collectCandidates(force) {
@@ -111,14 +111,34 @@ function collectCandidates(force) {
       } catch {}
     }
   }
-  hot.clear()
-  for (const [p, m] of fresh) hot.set(p, m)
+  // 这一步是**合并**，不能推倒重建。原来 `hot.clear()` 之后把所有当前 mtime 记成新基线：
+  // 那些"上次扫完之后、这次扫之前"的写入就被当成已经读过了，尾巴再也不看——正撞上最典型的
+  // 用法：任务静默超过 5 分钟（不在热窗口里、早就被清出 hot），然后按 Esc 打断，这一条恰好
+  // 落在两轮全量扫描之间，于是打断记录 100% 被吞，她永远不进 interrupted。
+  // 现在：已记录的文件保留它们**上次读过**的 mtime（于是照样会被判为"变了"、读一次尾巴）；
+  // 消失的删掉；新见到的先记 0——下一轮必然读一次尾巴（重复读没关系，`seen` 会去重）。
+  // force（启动基线）例外：后面马上会把所有尾巴读一遍记进 seen，所以直接记真实 mtime，免得白读第二轮。
+  for (const [p, m] of fresh) {
+    if (force) hot.set(p, m)
+    else if (!hot.has(p)) hot.set(p, 0)
+  }
+  for (const p of [...hot.keys()]) if (!fresh.has(p)) hot.delete(p)
   if (force) log(`基线扫描：${dirs.length} 个目录，热文件 ${hot.size} 个，已记录打断 ${seen.size} 条`)
 }
 
 function handleNewInterrupt(id) {
   if (seen.has(id)) return
   seen.add(id)
+  // transcript 落盘是异步的，我们可能比 UserPromptSubmit 的 hook 晚读到上一轮的打断。
+  // 这时 state.json 里已经躺着一条更新的 working，再拿 interrupted 盖上去，她下一轮明明
+  // 在干活却一直打断脸——而且 statusline 也读这个文件，会跟着一起错。2 秒内的新写入让位。
+  try {
+    const prev = JSON.parse(readFileSync(STATE, 'utf8'))
+    if (prev && typeof prev.ts === 'number' && Date.now() - prev.ts < 2000) {
+      log(`打断 ${id} 晚到了（state.json ${Date.now() - prev.ts}ms 前刚写过 ${prev.state}），不覆盖`)
+      return
+    }
+  } catch { /* 没有/坏文件：照常写 */ }
   try {
     writeFileSync(STATE, JSON.stringify({ state: 'interrupted', ts: Date.now() }))
     log(`检测到打断 ${id}，已把桌宠状态写成 interrupted`)
@@ -151,21 +171,83 @@ function poll() {
   }
 }
 
-// 单实例：pid 文件里那个进程还在就直接退出（SessionStart 每次开 Claude 都会拉起我们）
-try {
-  if (!ONESHOT && existsSync(PIDFILE)) {
-    const pid = Number(readFileSync(PIDFILE, 'utf8').trim())
-    if (Number.isInteger(pid) && pid > 0) {
-      try {
-        process.kill(pid, 0)     // 不抛就是还活着
-        process.exit(0)
-      } catch {}
-    }
+// ── 单实例：靠"pid + 心跳"的锁文件，不能只看 pid 还活着 ──────────────────
+// 两个真实故障都出在"只验 pid 存活"上：
+//   ① watcher 被强杀（关终端、任务管理器结束）留下 pid 文件，而 Windows 会复用 pid ——
+//      后来每次 SessionStart 拉起的 watcher 都发现"那个 pid 活着"，于是立刻自杀。
+//      结果是打断检测**永久静默失效**，还不报错。
+//   ② ONESHOT 自测（INTERRUPT_WATCH_ONESHOT=1）跑一轮就把在跑实例的 pid 文件覆盖掉了，
+//      正常的那个从此没人认领，下次再拉起一个，两个一起写 state.json。
+// 所以：写 "pid token"，每 20 秒刷一次 mtime 当心跳；判"那边还活着"= pid 活着**且**
+// 心跳比 90 秒新。ONESHOT 完全不碰锁文件（自测不该有副作用）。
+// 用**空格**分隔：readLock 是按空白切的，用别的符号 pid 那段会解析成 NaN，判活就永远失败。
+// RUN_ID 单独留着：自己写进去的是整条 TOKEN，读回来的是切出来的 token 段，拿整条去比会
+// 认为自己不是自己，每次心跳都把自己赶走（实测：起 20 秒后自杀，打断检测全废）。
+const RUN_ID = Math.random().toString(36).slice(2, 8)
+const TOKEN = process.pid + ' ' + RUN_ID
+const HEARTBEAT_MS = 20000
+const STALE_MS = 90000        // 心跳停了这么久 → 那边已经死了（比睡眠唤醒保守一些）
+let owned = false
+
+/** 读锁文件：返回 { pid, token, age }；没有/读坏了返回 undefined。 */
+function readLock() {
+  try {
+    const raw = readFileSync(PIDFILE, 'utf8').trim()
+    const age = Date.now() - statSync(PIDFILE).mtimeMs
+    const [pid, token] = raw.split(/\s+/)
+    return { pid: Number(pid), token, age }
+  } catch {
+    return undefined
   }
+}
+const pidAlive = (pid) => {
+  try {
+    process.kill(pid, 0)         // 不抛就是还活着
+    return true
+  } catch {
+    return false
+  }
+}
+/** 那个进程还算数吗：pid 活着 + 心跳新鲜。pid 复用能靠心跳识破。 */
+const holderAlive = (lock) =>
+  lock !== undefined && Number.isInteger(lock.pid) && lock.pid > 0 && lock.age < STALE_MS && pidAlive(lock.pid)
+
+function writeLock() {
   mkdirSync(PET_DIR, { recursive: true })
-  writeFileSync(PIDFILE, String(process.pid))
-} catch (e) {
-  log(`pid 文件处理失败：${e.message}`)
+  writeFileSync(PIDFILE, TOKEN)
+  owned = true
+}
+
+if (!ONESHOT) {
+  try {
+    const lock = readLock()
+    if (holderAlive(lock)) {
+      log(`已有实例在跑（pid ${lock.pid}，心跳 ${Math.round(lock.age / 1000)}s 前），本进程退出`)
+      process.exit(0)
+    }
+    if (lock !== undefined) log(`接管陈旧的锁文件（pid ${lock.pid}，心跳 ${Math.round(lock.age / 1000)}s 前）`)
+    writeLock()
+  } catch (e) {
+    log(`锁文件处理失败：${e.message}`)
+  }
+}
+
+/**
+ * 心跳。顺带做所有权校验：万一真出现两个实例（比如睡醒了），后写的那个会在下一次心跳发现
+ * 锁不是自己的，把**自己**收掉——而不是两个一起往 state.json 里写。谁收谁无所谓，关键只剩一个。
+ */
+function beat() {
+  if (ONESHOT || !owned) return
+  try {
+    const lock = readLock()
+    if (lock !== undefined && lock.token !== RUN_ID && holderAlive(lock)) {
+      log(`锁被 pid ${lock.pid} 抢走了，本进程退出（避免两个 watcher 同时写 state.json）`)
+      process.exit(0)
+    }
+    writeLock()
+  } catch (e) {
+    log(`心跳失败：${e.message}`)
+  }
 }
 
 // 基线：把现有 transcript 里的打断标记先记下来，别把历史事件当新事件重放
@@ -179,9 +261,10 @@ log(`watcher 启动 pid=${process.pid}，基线打断 ${seen.size} 条，盯 ${P
 
 if (ONESHOT) {
   poll()
-  log('oneshot 模式：跑完一轮就退出')
+  log('oneshot 模式：跑完一轮就退出（不碰锁文件）')
   process.exit(0)
 }
 
 setInterval(poll, POLL_MS)
+setInterval(beat, HEARTBEAT_MS)
 poll()

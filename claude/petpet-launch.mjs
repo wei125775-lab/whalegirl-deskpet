@@ -15,7 +15,7 @@
 // 已知没兜住的：同时开两个 Claude 窗口时，两个钩子可能都还没看到宠物就各拉一次
 // （要治只能给 PetPet 加单实例锁），概率极低，且右键退出多余的即可。
 import { execFileSync, spawn } from 'node:child_process'
-import { appendFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -56,6 +56,10 @@ const LOG = join(PET_DIR, 'launch.log')
 
 const log = (msg) => {
   try {
+    // 先建父目录（同 petpet-subagent.mjs）：appendFileSync 不建父目录，~/.petpet 还不存在时
+    // 写日志这一步直接 ENOENT 被吞。而"宠物没起来"的第一现场往往就是这台机器从没成功启动过，
+    // 于是唯一能说明原因的 '找不到 PetPet.exe，跳过启动' 恰好是写不出来的那一条。
+    mkdirSync(PET_DIR, { recursive: true })
     appendFileSync(LOG, `[${new Date().toISOString()}] ${msg}\n`)
   } catch {}
 }
@@ -86,6 +90,24 @@ if (existsSync(WATCH)) {
     log(`打断检测器拉起失败：${e.message}`)
   }
 }
+
+// 清掉上一个会话留下的子代理记号。记号的寿命本该由 SubagentStop 结束，但会话被杀/终端关掉时
+// 那个 hook 不会跑，文件就永远躺在那儿——新会话开起来，她脚边的小海豚一直转圈，可没有任何
+// 子代理在跑。主进程那边有个 1 小时的 mtime 兜底，可"昨天坏了、今天开机"这种正好卡在 1 小时内，
+// 表现就是开机即错误状态。30 分钟：够长到不会误伤正常跑着的子代理（跨过 30 分钟还正好赶上
+// 压缩触发的 SessionStart，才会提前沉下去一次，代价可接受），够短到开机就是干净的。
+try {
+  const marksDir = join(PET_DIR, 'subagents')
+  const cutoff = Date.now() - 30 * 60 * 1000
+  let cleared = 0
+  for (const f of readdirSync(marksDir)) {
+    const p = join(marksDir, f)
+    try {
+      if (statSync(p).mtimeMs < cutoff) { rmSync(p, { force: true }); cleared += 1 }
+    } catch { /* 单个删不掉不影响其他 */ }
+  }
+  if (cleared > 0) log(`清掉 ${cleared} 个陈旧的子代理记号`)
+} catch { /* 目录不存在（没跑过子代理）是常态 */ }
 
 const exe = findExe()
 

@@ -15,7 +15,7 @@
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PKG_NAME = '@wei125775-lab/whalegirl-deskpet'
@@ -126,9 +126,16 @@ function installRenderer(profile) {
     ...(storeDir === undefined ? [] : ['--store-dir=' + storeDir]),
     '--virtual-store-dir=' + virtualStoreDir,
   ]
-  console.log('   ' + cli + ' ' + args.join(' '))
-  // Windows 上的 dsh.cmd 是批处理，必须走 shell。args 全是本脚本拼的字面量，没有外部输入。
-  const r = spawnSync(cli, args, { stdio: 'inherit', shell: process.platform === 'win32' })
+  // Windows 上的 dsh.cmd 是批处理，必须走 shell；可 shell:true 时 Node 把命令拼成一整行交给
+  // cmd.exe，**参数里的空格会被当成分隔符**——用户名带空格（C:\Users\John Doe\…）或 dsh 装在
+  // Program Files 下时，pnpm store 路径被拆成两个参数，这一步必失败。所以走 shell 时逐个加引号。
+  // （cmd /s 会剥掉最外层那一对引号，所以每段自己带引号是正解。）
+  const shell = process.platform === 'win32'
+  const q = (s) => '"' + String(s) + '"'
+  const argv = shell ? args.map(q) : args
+  const shown = shell ? [q(cli), ...argv].join(' ') : [cli, ...args].join(' ')
+  console.log('   ' + shown)
+  const r = spawnSync(shell ? q(cli) : cli, argv, { stdio: 'inherit', shell })
   if (r.error !== undefined) {
     console.log('   启动失败：' + r.error.message)
     return false
@@ -169,6 +176,19 @@ if (hasRenderer) {
   console.log('renderer   : ' + REQUIRED + ' ** NOT INSTALLED ** — she will not show up yet (see the end)')
 }
 
+// 1.5 Refuse to run from the installed copy itself. install.cmd lives inside the plugin
+// directory, so double-clicking it again after installing is a natural thing to do --
+// and then `here` IS `installedAt`. The copy step would delete this very copy first and
+// then copy from a source that no longer exists, leaving the plugin gone while its entry
+// stayed in the profile's bundles list. Checked before anything that does work: no point
+// spending a `dsh plugin add` on an install we are about to refuse.
+const relHere = relative(installedAt, here)
+if (relHere === '' || (!relHere.startsWith('..') && !isAbsolute(relHere))) {
+  fail('this is the installed copy itself: ' + here + '\n' +
+    'Going on would delete this copy first — i.e. uninstall the plugin.\n' +
+    'Run it from the source checkout instead, or unpack a fresh copy elsewhere.')
+}
+
 if (dryRun) {
   console.log('')
   console.log('[dry-run] would copy   ' + here + '  ->  ' + installedAt)
@@ -180,7 +200,7 @@ if (dryRun) {
   process.exit(0)
 }
 
-// 1.5 渲染器：没装就替你装上。没有它什么都不会显示，而这一步对陌生人最容易漏。
+// 1.7 渲染器：没装就替你装上。没有它什么都不会显示，而这一步对陌生人最容易漏。
 // 默认装（用户要的行为）；不想要这个副作用就加 --no-renderer。
 if (!hasRenderer && !skipRenderer) {
   console.log('renderer   : not installed — installing it now (pass --no-renderer to skip)')
@@ -192,9 +212,17 @@ if (!hasRenderer && !skipRenderer) {
 // 2. Copy the package (drop any previous copy first so stale frames cannot linger).
 if (existsSync(installedAt)) rmSync(installedAt, { recursive: true, force: true })
 mkdirSync(dirname(installedAt), { recursive: true })
+// `src` arrives as a full path, so the test has to be relative to `here`. With the old
+// src.includes('node_modules') form, a source tree that itself sat under some
+// node_modules had its own root rejected -- and when cpSync rejects the root it says
+// nothing, creates nothing and copies nothing, while the script carries on and prints
+// "copied" as if it had worked.
 cpSync(here, installedAt, {
   recursive: true,
-  filter: (src) => !src.includes('node_modules') && !src.includes('.git'),
+  filter: (src) => {
+    const parts = relative(here, src).split(sep)
+    return !parts.includes('node_modules') && !parts.includes('.git')
+  },
 })
 console.log('copied     : -> ' + installedAt)
 
@@ -259,8 +287,9 @@ if (hasRenderer) {
   console.log('     - In the dsh UI: open the plugin market and search for "dsh-pet".')
   console.log('     - Or from a terminal:')
   console.log('         dsh plugin --profile ' + profile.name + ' add ' + REQUIRED)
-  if (pnpmStore !== undefined) console.log('           --store-dir=' + pnpmStore)
-  console.log('           --virtual-store-dir=' + virtualStore)
+  // 这两条路径要加引号：用户名或安装目录带空格时，照抄圆括号里的原样命令会被 cmd 拆成两个参数
+  if (pnpmStore !== undefined) console.log('           "--store-dir=' + pnpmStore + '"')
+  console.log('           "--virtual-store-dir=' + virtualStore + '"')
   console.log('')
   console.log('   Both store flags are required: the pnpm bundled with dsh does not read the')
   console.log("   profile's .npmrc, and leaving either one out fails with ERR_PNPM_UNEXPECTED_STORE.")

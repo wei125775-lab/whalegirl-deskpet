@@ -1,6 +1,6 @@
 {
   "name": "@wei125775-lab/whalegirl-deskpet",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "鲸鱼娘桌宠 for dsh —— frames2d 宠物：待机是分层烘焙的呼吸+飘发+眨眼，动作由 AI 视频转序列帧",
   "type": "module",
   "main": "lib/index.js",

@@ -16,5 +16,13 @@ import { join } from 'node:path'
 const state = process.argv[2] === 'working' ? 'working' : 'idle'
 const dir = join(homedir(), '.petpet')
 
-mkdirSync(dir, { recursive: true })
-writeFileSync(join(dir, 'state.json'), JSON.stringify({ state, ts: Date.now() }))
+// 必须包住，而且**必须正常退出**。这一支是四个 hook 里唯一没有兜底的：抛出去就是退出码非 0，
+// 而 UserPromptSubmit 的非 0 退出码在 Claude Code 那边是"拦下这次提交"——目录只读、杀软锁文件、
+// 磁盘满，任何一次写失败都会变成"按回车没反应"，用户根本不会想到是桌宠干的。
+// 失败只写 stderr（`claude --debug` 里看得见），不影响对话。
+try {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({ state, ts: Date.now() }))
+} catch (e) {
+  process.stderr.write('[petpet-state] 写 ' + dir + '/state.json 失败：' + (e && e.message) + '\n')
+}

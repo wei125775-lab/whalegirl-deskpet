@@ -60,21 +60,66 @@
 #      处理。按下都没收到说明拖拽本就没开始，拿上一次点击的残值算距离毫无意义
 #    - 拖拽只认左键：右键点开会弹原生菜单，菜单独占鼠标、pointerup 送不回 canvas，
 #      dragging 一直挂着把穿透状态冻住，那几秒里她照样点不动（实测 0.5~5 秒）
+# ⑯ 精灵表支持折行：切片时算出的一行帧数（cols）原来只用在列上、行号恒为 0，
+#    单行表宽 = 帧数 x 帧宽，而 GPU 的最大纹理边长常见只有 16384。摔倒的 recover 是
+#    52 x 545 = 28340，**超了**——超限时纹理创建静默失败，不报错，只是那个动作永远
+#    加载不出来。现在行号也取上（构建端按每行 16 帧排，见 build_fall.py 的 pack_sheet）。
+#    单行表 cols 就等于帧数、row 恒为 0，老宠物包行为完全不变。
+#    配套还得改两处**按"帧宽×帧数"预估表宽**的老校验（main.js 的 pet:load、
+#    pet-import.cjs 的包校验）：那个公式同样假设所有帧排成一行，折行表会被它算出
+#    28340 这种根本没发生过的宽度，把合法宠物拦在门外（表现是启动即加载失败、
+#    导入宠物包报错）。改成读精灵表头部拿真实宽高，读不到才回落老公式
+# ⑰ 连点摔倒：2500ms 内点够 8 次，她就绊一跤坐地上。计数器独立于比心那个 clickStreak
+#    （那个窗口才 600ms，而且触发比心时自己清零，共用会让摔倒永远轮不上）。
+#    三段 fall -> sit -> recover 里 sit 是 hold：播完停在末帧，由渲染层"坐下 3 秒"
+#    的计时器切 recover；三段播放期间点击一律不响应（正摔到一半比心就破戏了）。
+#    端着碗吃、或子代理在看鲸鱼时不摔——这两个状态是外部信号驱动的，摔完没人把她送回去
+# ⑱ 点击反应播完回哪儿：原来一律回待机。但 Claude 还在干活时被点一下，她挥手之后该
+#    回去接着吃——饭还在那儿。主进程的外部状态信号只在内容**变化**时才发（去重），点击
+#    不写状态文件，所以这一次不会有信号来把她送回碗边，回头路得渲染层自己接：记住最近
+#    一次状态（externalState），一次性动作（wave/heart/putaway）播完后若它仍是 working
+#    且没在看鲸鱼，就回工作动作而不是待机
+# ⑲ 再修五处会静默失效的地方：
+#    - 隐藏窗口的系统通知从不发出：Electron 主进程**没有**全局 Notification（electron.d.ts 里
+#      它只挂在 `namespace Main` 下，那是类型命名空间、不产生运行时全局），直接 new 抛
+#      ReferenceError，而调用处包着 try/catch——表现就是"窗口隐藏时提醒只在横幅里闪一下"，
+#      100% 失效且毫无痕迹。改成从 require('electron') 里解构
+#    - 干活期间重启桌宠，她整轮待机：渲染层的 onPetState/onSubagent 是在 setupUI() 里注册的，
+#      比首帧那次推送晚；而主进程的去重标记当时已经记下了，后面内容没变就永远不再发。在
+#      窗口加载完成时把两个标记清零，逼它重发一次
+#    - 外部状态文件的撕裂读被当成事实：读到写了一半的 JSON 时，原来无条件把 lastFileState
+#      置回 'idle'，一次撕裂就把她按回待机（下次真变化前都醒不过来）。改成保留上一版
+#    - recover 动作缺失会锁死左键：摔倒那套只装到 sit 就停了，canTrip() 却只查 fall/sit，
+#      于是每次连点都摔进一个没有出口的 hold，点击再也点不动。canTrip() 改成三段齐备才允许
+#      摔；sit 的计时器那边也补一道兜底——recover 没播起来就回 idle 解锁
+#    - 导入宠物包在装了 Git 的机器上必然失败：Windows 上裸名 'tar' 走 PATH 命中的是 Git 自带的
+#      GNU tar，它不认 zip；更隐蔽的是解压前的预算校验靠 `tar -tvf` 的字段位置取 size，GNU tar
+#      列排布不同、解析出空数组，"总量/单文件/压缩比"三条上限**全部静默失效**。点名用系统自带的
+#      C:/Windows/System32/tar.exe
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
+
+
+
+
 
 --- a/viewer/main.js
 +++ b/viewer/main.js
-@@ -1,12 +1,20 @@
+@@ -1,11 +1,23 @@
  // PetPet 桌宠查看器 - 主进程
  // Electron 主进程：透明窗口、托盘、IPC 文件读取
 -const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, protocol, net, dialog } = require('electron')
-+const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, protocol, net, dialog, powerMonitor } = require('electron')
++// Notification 必须在这里解构出来：Electron 主进程**没有**全局 Notification（electron.d.ts 里它
++// 只挂在 `namespace Main` 下，那是类型命名空间，不产生运行时全局）。直接 `new Notification(...)`
++// 抛的是 ReferenceError，而调用处包着 try/catch，会被静默吞掉——表现就是"窗口隐藏时提醒只在
++// 横幅里闪一下、永远收不到系统通知"，100% 失效且毫无痕迹。
++const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, protocol, net, dialog, powerMonitor, Notification } = require('electron')
  const path = require('path')
  const fs = require('fs')
  const { pathToFileURL } = require('url')
- const { importPetDir, importPetZip } = require('./pet-import.cjs')
+-const { importPetDir, importPetZip } = require('./pet-import.cjs')
++const { importPetDir, importPetZip, pngSize, webpSize, jpgSize, gifSize, bmpSize } = require('./pet-import.cjs')
  const { safePetId, isSafeUnderRoot } = require('./security-utils.cjs')
- 
++
 +// 单实例：启动第二份就会并排出现两只宠物。调试期反复重启、旧进程没退干净时最明显
 +// （2026-09-17 用户报"经常性出现两只"）。抢不到锁的直接退——quit() 是异步的，
 +// 不跟着 exit 的话下面 whenReady 照样会跑起来，又开一个窗口出来。
@@ -82,11 +127,10 @@
 +  app.quit()
 +  process.exit(0)
 +}
-+
+ 
  const PETS_ROOT = path.join(app.getPath('home'), '.petpet', 'pets')
  
- // P0（2026-08-09 红苕爸爸 Windows 实测暴露）：启动即自动创建宠物目录，
-@@ -33,7 +41,9 @@
+@@ -33,7 +45,9 @@
  // N-3：注册自定义协议（需在 app ready 前），渲染层用短 URL 流式读资产
  // petpet://<petId>/<relPath> → 文件系统，零 base64、零主进程内存驻留
  protocol.registerSchemesAsPrivileged([
@@ -97,7 +141,7 @@
  ])
  
  let mainWindow = null
-@@ -42,6 +52,14 @@
+@@ -42,6 +56,14 @@
  let currentPetActions = null
  let currentPetName = '宠物'  // P0-3：菜单文案不再硬编码红苕
  
@@ -112,7 +156,7 @@
  // 动作名 → 中文标签（内置兜底映射，pet.json 的 label 优先，见 actionMenuLabel）
  const ACTION_LABELS = {
    idle: '待机', sleep: '睡觉', sniff: '嗅闻', wiggle: '撒娇',
-@@ -75,19 +93,51 @@
+@@ -75,19 +97,51 @@
    }
  }
  
@@ -168,7 +212,7 @@
      hasShadow: false,
      skipTaskbar: false,
      webPreferences: {
-@@ -100,6 +150,15 @@
+@@ -100,6 +154,15 @@
    })
  
    mainWindow.setAlwaysOnTop(true, 'screen-saver')
@@ -184,7 +228,26 @@
    // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
    if (process.platform === 'darwin') {
      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-@@ -231,6 +290,16 @@
+@@ -118,6 +181,18 @@
+   } else {
+     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'))
+   }
++
++  // 页面装完把两个"发过就别忘了"标记清掉，逼下一轮重发一次。
++  //
++  // 渲染层的 onPetState/onSubagent 监听器要到 setupUI() 才注册，而每秒轮询在窗口建好后很快就
++  // 可能先发一轮：那一次 send 落进还没有监听器的渲染层就被丢掉了，可去重标记（lastStateSent /
++  // lastSubagentCount）已经置上，之后内容没变就再也不发。症状是**干活期间重启桌宠**（state.json
++  // 里已经是 working）她会从头到尾端着手站那儿不动，整轮都不回神——和 2026-09-17 修的
++  // "她一直是待机"同源，只是那次是变量被清错位置，这次是首帧压根没送到。
++  mainWindow.webContents.on('did-finish-load', () => {
++    lastStateSent = ''
++    lastSubagentCount = -1
++  })
+ 
+   mainWindow.on('closed', () => { mainWindow = null })
+ }
+@@ -231,6 +306,16 @@
    })
  }
  
@@ -201,7 +264,7 @@
  // 右键菜单：原生 macOS Menu.popup（自动毛玻璃/定位，替代 HTML 自绘）
  ipcMain.handle('menu:showContext', (_evt, x, y) => {
    const petName = currentPetName || '宠物'
-@@ -249,7 +318,10 @@
+@@ -249,7 +334,10 @@
    template.push({ type: 'separator' })
    template.push({ label: '↺ 重置大小', click: () => send('view:reset') })
    const menu = Menu.buildFromTemplate(template)
@@ -213,7 +276,7 @@
  })
  
  function toggleWindow() {
-@@ -270,14 +342,22 @@
+@@ -270,13 +358,21 @@
  }
  
  // P0-4: 从托盘/菜单打开提醒面板前，先解除窗口穿透 + 抢焦点（否则面板点不动、键盘输不进去）
@@ -227,16 +290,15 @@
    mainWindow.focus()
    send('open:reminder')
  }
- 
++
 +ipcMain.on('reminder:panel-closed', () => {
 +  if (!mainWindow || mainWindow.isDestroyed()) return
 +  mainWindow.setFocusable(false)
 +})
-+
+ 
  // ---------- IPC：宠物资产读取 ----------
  // 列出 ~/.petpet/pets 下的宠物
- ipcMain.handle('pet:list', () => {
-@@ -285,7 +365,9 @@
+@@ -285,12 +381,37 @@
      const dirs = fs.readdirSync(PETS_ROOT, { withFileTypes: true })
        .filter(d => d.isDirectory())
        .map(d => d.name)
@@ -247,7 +309,79 @@
      return dirs
    } catch (e) {
      return []
-@@ -390,22 +472,63 @@
+   }
+ })
++
++// 读精灵表的真实宽高（只读头部，见 pet-import.cjs 的 readHead 那套）。
++// 给 pet:load 的纹理上限校验用：那里原来按"帧宽×帧数"估宽，折行的表会被估出一个
++// 根本没发生过的宽度（见调用处注释）。读不到就返回 null，调用方回落老公式。
++function readSheetSize(file) {
++  try {
++    const fd = fs.openSync(file, 'r')
++    let head
++    try {
++      const buf = Buffer.alloc(65536)
++      head = buf.subarray(0, fs.readSync(fd, buf, 0, buf.length, 0))
++    } finally { fs.closeSync(fd) }
++    const ext = path.extname(file).toLowerCase()
++    const sz = ext === '.png' ? pngSize(head)
++      : ext === '.webp' ? webpSize(head)
++        : /\.jpe?g$/.test(ext) ? jpgSize(head)
++          : ext === '.gif' ? gifSize(head)
++            : ext === '.bmp' ? bmpSize(head) : null
++    return sz ? { width: sz.width, height: sz.height, pixels: sz.width * sz.height } : null
++  } catch (e) {
++    return null
++  }
++}
+ 
+ // 读取 pet.json
+ ipcMain.handle('pet:load', (_evt, petId) => {
+@@ -303,6 +424,7 @@
+     // D-5: 数值上限校验（2026-08-09，外部审计指出恶意 pet.json 可构造资源炸弹；上限对齐 pipeline/validate_pet.py 纹理铁律）
+     // AI 工具审计 V-05：补乘积校验（frameWidth×frames 单查必过但组合可构造 819 万像素宽纹理）+ actions 键数上限
+     const MAX_TEXTURE = 16384, MAX_FRAMES = 500, MAX_FPS = 120, MAX_ACTIONS = 50
++    const MAX_PIXELS = 8192 * 8192   // 与 pet-import.cjs 的 MAX_TEXTURE_PIXELS 同口径
+     if (data && data.actions && typeof data.actions === 'object') {
+       const actionCount = Object.keys(data.actions).length
+       if (actionCount > MAX_ACTIONS) return { error: `actions 键数 ${actionCount} 超过上限(≤${MAX_ACTIONS})` }
+@@ -314,9 +436,32 @@
+         if (fh != null && (!Number.isFinite(Number(fh)) || Number(fh) < 1 || Number(fh) > MAX_TEXTURE)) return { error: `action ${name}: frameHeight 超上限(≤${MAX_TEXTURE})` }
+         if (a.frames != null && (!Number.isFinite(Number(a.frames)) || Number(a.frames) < 1 || Number(a.frames) > MAX_FRAMES)) return { error: `action ${name}: frames 超上限(≤${MAX_FRAMES})` }
+         if (a.fps != null && (!Number.isFinite(Number(a.fps)) || Number(a.fps) < 1 || Number(a.fps) > MAX_FPS)) return { error: `action ${name}: fps 超上限(≤${MAX_FPS})` }
+-        // V-05: 乘积校验——单项合法但组合超限的纹理（如 16384×500）会撑爆 WebGL
+-        const prodW = (fw ?? 0) * (a.frames ?? 1)
+-        if (prodW > MAX_TEXTURE) return { error: `action ${name}: frameWidth×frames = ${prodW} 超过 ${MAX_TEXTURE} 上限` }
++        // V-05: 纹理尺寸校验——单项合法但组合超限的纹理（如 16384×500）会撑爆 WebGL。
++        //
++        // 原来算的是 frameWidth×frames（假设所有帧横着排成一行）。**精灵表是可以折行的**：
++        // 一张 8720x2560 里放 52 帧、每行 16 帧，按老公式会算出 28340——一个根本不存在的
++        // 宽度，把合法宠物拦在门外（2026-09-21 加摔倒动作时踩到，表现是整只宠物加载失败、
++        // 启动就弹错误卡片）。折行的排布没写进 pet.json（渲染层是按图片实际宽度除单帧宽
++        // 自己算的），所以这里也去读图片头部拿**真实尺寸**，读不到才回落老公式
++        // （那条路只可能是文件缺失/损坏，宁可保守）。
++        const rel = a.file || a.sprite
++        let sheet = null
++        if (rel) {
++          const abs = path.join(PETS_ROOT, safe, String(rel))
++          const back = path.relative(path.join(PETS_ROOT, safe), abs)
++          if (!back.startsWith('..') && !path.isAbsolute(back)) sheet = readSheetSize(abs)
++        }
++        if (sheet) {
++          if (sheet.width > MAX_TEXTURE || sheet.height > MAX_TEXTURE) {
++            return { error: `action ${name}: 精灵表 ${sheet.width}×${sheet.height} 超过 ${MAX_TEXTURE} 上限` }
++          }
++          if (sheet.pixels > MAX_PIXELS) {
++            return { error: `action ${name}: 精灵表 ${sheet.width}×${sheet.height} = ${sheet.pixels} 像素超过 ${MAX_PIXELS} 上限` }
++          }
++        } else {
++          const prodW = (fw ?? 0) * (a.frames ?? 1)
++          if (prodW > MAX_TEXTURE) return { error: `action ${name}: frameWidth×frames = ${prodW} 超过 ${MAX_TEXTURE} 上限` }
++        }
+       }
+     }
+     return data
+@@ -390,22 +535,63 @@
    })
  }
  
@@ -314,7 +448,7 @@
  })
  
  // 查询窗口当前位置（拖拽用）
-@@ -541,7 +664,7 @@
+@@ -541,7 +727,7 @@
      width: 300,
      height: 400,
      x,
@@ -323,7 +457,7 @@
      frame: false,
      // P1-8: 日记窗口可拖动、可缩放（此前不可移动不可缩放，挡住内容只能退出重开）
      movable: true,
-@@ -574,7 +697,10 @@
+@@ -574,7 +760,10 @@
  
  // 设置提醒：{ at: ms 时间戳, repeat: 'none'|'daily'|'weekly', text }
  ipcMain.handle('reminder:set', (_evt, spec) => {
@@ -335,7 +469,7 @@
      return { error: '时间无效' }
    }
    const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
-@@ -609,24 +735,131 @@
+@@ -609,23 +798,134 @@
    }
    send('reminder:fire', { id, text: r.text })
    appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
@@ -383,11 +517,15 @@
 +  }
 +  if (st.mtimeMs !== lastStateMtime) {
 +    lastStateMtime = st.mtimeMs
-+    lastFileState = 'idle'
++    // 解析成功才认这一版。这里原来先无条件 `lastFileState = 'idle'` 再解析，于是**写了一半的
++    // 撕裂读会被锁存成 idle**（hook 是"截断再写"，读到的可能是空文件或半截 JSON），她会从
++    // 吃饭里掉出来，一秒后下一轮才回到工作态。宁可留着上一版：写者只会写
++    // working/idle/interrupted，认不出来的内容当没发生过，比凭空待机更接近真相。
++    // 真要是状态文件就这么坏下去不更新了，下面 STATE_STALE_MS 那道超时兜底照样把她打回待机。
 +    try {
 +      const obj = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'))
 +      if (obj && typeof obj.state === 'string' && EXTERNAL_STATES.has(obj.state)) lastFileState = obj.state
-+    } catch (e) { /* 写了一半的撕裂读，按 idle */ }
++    } catch (e) { /* 写了一半的撕裂读，保留上一版 */ }
 +  }
 +  // 文件没动也要照常发：状态是"当前是什么"，不是"这次变了什么"
 +  let state = lastFileState
@@ -458,7 +596,7 @@
 +  try { pollSubagents() } catch (e) { console.warn('[PetPet] 子代理轮询出错：', e) }
 +  try { nudgeHitTest() } catch (e) { console.warn('[PetPet] 穿透重算出错：', e) }
  }, 1000)
- 
++
 +// 光标位置的高频喂送，理由见 pushCursor。60ms 是个折中：再快也只是让窗口更早"醒"，收益
 +// 远不如多出来的 IPC；再慢用户就又要等那半秒了
 +setInterval(() => { try { pushCursor() } catch (e) { console.warn('[PetPet] 光标位置推送出错：', e) } }, 60)
@@ -470,11 +608,10 @@
 +    try { powerMonitor.on(ev, () => nudgeHitTest()) } catch (e) { /* 该平台没有这个事件 */ }
 +  }
 +}
-+
+ 
  // ---------- 生命周期 ----------
  // 截图测试模式：electron . --screenshot=/tmp/x.png [--action=run]
- const shotArg = process.argv.find(a => a.startsWith('--screenshot='))
-@@ -635,6 +868,9 @@
+@@ -635,6 +935,9 @@
  const openReminderArg = process.argv.includes('--open-reminder')
  
  app.whenReady().then(() => {
@@ -484,6 +621,23 @@
    registerPetpetProtocol()  // N-3：自定义协议（CSP 已放行 petpet:）
    createWindow()
    // macOS Dock 图标：示例宠物头像（内嵌 base64，打包后有效；换宠物时替换此图标）
+
+--- a/viewer/preload.cjs
++++ b/viewer/preload.cjs
+@@ -23,6 +23,12 @@
+   notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
+   openDiary: (petId) => ipcRenderer.send('diary:open', petId),
+   onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
++  notifyReminderClosed: () => ipcRenderer.send('reminder:panel-closed'),  // 面板关掉 → 主进程恢复"不抢焦点"
+   onVisibility: (cb) => ipcRenderer.on('pet:visibility', (_e, visible) => cb(visible)),  // P2-5: 隐藏时暂停动画
++  onPetState: (cb) => ipcRenderer.on('pet:state', (_e, state) => cb(state)),  // 外部状态信号（Claude 在干活 → 循环吃饭）
++  onOverlay: (cb) => ipcRenderer.on('pet:overlay', (_e, spec) => cb(spec)),  // 叠加层数量（当前未启用，代码留着以后做道具/特效）
++  onSubagent: (cb) => ipcRenderer.on('pet:subagent', (_e, n) => cb(n)),  // 子代理数量：>0 她停下看鲸鱼，回到 0 鲸鱼沉入
++  onRehit: (cb) => ipcRenderer.on('pet:rehit', (_e, p) => cb(p)),  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
++  onCursor: (cb) => ipcRenderer.on('pet:cursor', (_e, p) => cb(p)), // 60ms 一次的光标位置（穿透态下 mousemove 到不了渲染层）
+ })
+ 
+
 --- a/viewer/src/main.ts
 +++ b/viewer/src/main.ts
 @@ -4,7 +4,8 @@
@@ -496,7 +650,7 @@
  import { effectiveWeight } from './temperament' // V2-A: 气质调制器（2026-08-09）
  
  // ================= 类型 =================
-@@ -20,19 +21,40 @@
+@@ -20,8 +21,26 @@
    frameHeight?: number
    scale?: number
    transitions?: Record<string, number>
@@ -507,8 +661,8 @@
 +  variants?: { action: string; weight: number; putaway?: string }[] // 本地扩展：外部信号（干活）时按权重换成别的动作，见 pickWorkAction；putaway 指定这碗用哪条收碗动作
    label?: string // v3：菜单显示名（优先于内置映射）
    diary?: { mood: string; text: string } // v3：动作→日记心情文案（优先于内置映射）
- }
- 
++}
++
 +// 本地扩展：叠加层。一张独立精灵表，按数量叠在角色上（子代理 → 脚边游几只小海豚）。
 +// 之所以是独立图层而不是一个动作：动作是整帧替换，没法"她照常吃饭、脚边多两只海豚"。
 +interface PetOverlaySpec {
@@ -520,11 +674,10 @@
 +  frameHeight?: number
 +  scale?: number        // 叠加层相对角色的额外缩放
 +  slots: { x: number; y: number; scale?: number }[]  // 每个实例的位置：相对角色画布中心的偏移（画布像素）
-+}
-+
+ }
+ 
  interface PetJson {
-   version: number
-   id: string
+@@ -30,9 +49,12 @@
    name: string
    theme?: string
    bubbles?: string[] // v3：互动气泡文案池（优先于内置 BUBBLE_TEXTS）
@@ -551,15 +704,17 @@
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -93,6 +121,7 @@
+@@ -93,18 +121,37 @@
  } catch { /* ignore */ }
  let pingpongDir = 1
  let bubbleTimer: ReturnType<typeof setTimeout> | null = null
 +let lastInteractTs = Date.now()   // 上次和她互动的时刻（点她、或收到干活信号），给「久没见」判据用
  let randomTimer: ReturnType<typeof setInterval> | null = null
  let transitionTimer: ReturnType<typeof setTimeout> | null = null // 行为链调度（scheduleTransition）
++let fallTimer: ReturnType<typeof setTimeout> | null = null // 摔倒：坐地上等够 3 秒就自己起来
  let reminderBarOn = false
-@@ -101,10 +130,20 @@
+ // 渲染进程跟踪的窗口状态（初始 = 主进程创建尺寸/位置；本地维护，避免异步竞态漂移）
+ let curWinW = 320
  let curWinH = 320
  let curWinX = 0
  let curWinY = 0
@@ -577,10 +732,17 @@
 +// 「久没见」的判据：距上次互动（点她 / 收到干活信号）超过这个时长，下次点她就当她久没见你、换一套文案。
 +// 纯渲染层判断，不问主进程——她一直在屏幕上，能感觉到的"离开"就是没人理她。
 +const RETURN_GAP_MS = 10 * 60 * 1000
++// 连点摔倒：窗口内戳够这么多下，她就被戳烦了、绊一跤坐地上。窗口开得比比心那个
++// （600ms 判"连着点两下"）宽得多——这是"烦躁地猛戳"，得给人反应的时间。
++const RAPID_WINDOW = 2500
++const RAPID_AFTER = 8
++// 坐地上之后等多久自己起来。从**坐下的那一刻**起算（不是从播完起算，也不是从最后一次
++// 点击起算）：三段里只有 sit 是能无限拖的，见面那 0.92 秒是摔倒本身，不该算进等待里。
++const SIT_HOLD_MS = 3000
  
  // ================= 初始化 =================
  async function init() {
-@@ -114,6 +153,7 @@
+@@ -114,6 +161,7 @@
      resizeTo: window,
      resolution: Math.min(window.devicePixelRatio || 1, 2)
    })
@@ -588,7 +750,7 @@
    document.getElementById('stage')?.replaceWith(app.canvas)
    app.canvas.style.width = '100%'
    app.canvas.style.height = '100%'
-@@ -124,33 +164,78 @@
+@@ -124,33 +172,78 @@
  
    // 拖拽移动窗口
    let dragging = false
@@ -674,7 +836,7 @@
    function uiRects() {
      const out: { x: number; y: number; w: number; h: number }[] = []
      for (const el of [
-@@ -168,14 +253,41 @@
+@@ -168,14 +261,41 @@
      })
      return out
    }
@@ -720,7 +882,7 @@
        lastIgnore = shouldIgnore
        window.petAPI.setIgnoreMouse(shouldIgnore, true)
      }
-@@ -184,17 +296,61 @@
+@@ -184,17 +304,86 @@
    document.addEventListener('pointermove', updateMouseIgnore, true)
    // 初始穿透
    setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
@@ -751,29 +913,54 @@
 +  const STREAK_WINDOW = 600
 +  const HEART_AFTER = 4
 +  const HEART_CHANCE = 0.45
++  // 猛戳计数（摔倒用）。必须和上面那套分开算，理由见 pointerup 里的注释。
++  let rapidStreak = 0
++  let lastRapidTs = 0
 +  app.canvas.addEventListener('pointerdown', (e) => {
 +    downPos = { x: e.clientX, y: e.clientY }
 +    downSeen = true
 +  })
    app.canvas.addEventListener('pointerup', (e) => {
      lastPointerUp = Date.now()
--    if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
-     const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
--    if (dist < 6) showBubbleText() // 单击 = 互动气泡
++    const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
 +    const hadDown = downSeen
 +    downSeen = false
-+    if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
+     if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
+-    const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
+-    if (dist < 6) showBubbleText() // 单击 = 互动气泡
 +    // hadDown 为假说明 down 压根没收到，downPos 还停在上一次点击的残值——拿它算出来的 dist
 +    // 是"这次松手的位置到上次点击的位置"，毫无意义，只会把点击误判成拖拽。而且按下都没收到，
 +    // 拖拽本来也没开始，这时候按点击处理才是用户的本意（2026-09-20 长按点不动就是这个）
 +    if (hadDown && dist >= 6) { console.log(`[点击] 判定为拖拽，不触发互动 dist=${dist.toFixed(1)}`); return }
++    // 摔倒这三段（fall/sit/recover）播放期间点她一律没反应：正摔到一半突然挥手、或者
++    // 坐在那儿跟你比心，当场破戏。气泡也不弹——她这会儿没空理你。起身时机完全由
++    // playAction 里那个 hold 计时器说了算，点在中间也改不了它（行为可预测，
++    // 和预览里看到的一致）
++    if (inFallSeq()) return
++    const now = Date.now()
++    // 猛戳计数先走：戳够 8 下就绊一跤，这一下不再走挥手/比心。
++    // 为什么要独立计数器：比心那个 clickStreak 窗口只有 600ms，而且触发比心时会自己
++    // 清零（wantHeart 那句）。共用一个的话，猛戳到第 4 下左右就会被比心清掉计数，
++    // 摔倒永远轮不上。
++    rapidStreak = now - lastRapidTs < RAPID_WINDOW ? rapidStreak + 1 : 1
++    lastRapidTs = now
++    const since = now - lastInteractTs
++    lastInteractTs = now
++    if (rapidStreak >= RAPID_AFTER) {
++      rapidStreak = 0
++      // 手上有正事就不摔，这一轮连点也一并作废——不然怒气攒着，等她一放下碗、
++      // 下一次点击就当场倒地。戳了没反应也挺合理：她正忙着
++      if (canTrip()) {
++        clickStreak = 0   // 这一跤把整轮连点都用掉了，站起来别再直接接个比心
++        showBubbleText(undefined, 'fall')
++        requestAction('fall', 'click')
++        return
++      }
++    }
 +    // 单击 = 互动气泡。距上次互动超过 RETURN_GAP_MS 就当她久没见你——同一句"要摸摸头吗"，
 +    // 隔十分钟没人理之后说出来，意思是不一样的
-+    const since = Date.now() - lastInteractTs
-+    lastInteractTs = Date.now()
 +    showBubbleText(undefined, since > RETURN_GAP_MS ? 'return' : 'click')
 +    // 点击反应：默认挥手，连点多次后按概率改比心
-+    const now = Date.now()
 +    clickStreak = now - lastClickTs < STREAK_WINDOW ? clickStreak + 1 : 1
 +    lastClickTs = now
 +    const wantHeart = clickStreak >= HEART_AFTER && Math.random() < HEART_CHANCE
@@ -785,10 +972,26 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -347,6 +503,138 @@
+@@ -338,17 +527,185 @@
+   const cols = Math.max(1, Math.floor(tex.width / cw))
+   const frames: PIXI.Texture[] = []
+   for (let i = 0; i < act.frames; i++) {
++    // 折行的精灵表：一行的帧数由表宽除单帧宽算出来，行号也得跟着用上。
++    // 为什么要折行：GPU 最大纹理边长常见是 16384，而单行表宽 = 帧数 x 帧宽
++    // （摔倒的 recover 是 52x545 = 28340），超了纹理创建会**静默失败**——
++    // 不报错，只是那个动作永远加载不出来。构建端按每行 16 帧排好（build_fall.py
++    // 的 pack_sheet），这里照着读就行。单行表 cols 就等于帧数、row 恒为 0，行为不变。
+     const col = i % cols
++    const row = Math.floor(i / cols)
+     frames.push(new PIXI.Texture({
+       source: tex.source,
+-      frame: new PIXI.Rectangle(col * cw, 0, cw, ch)
++      frame: new PIXI.Rectangle(col * cw, row * ch, cw, ch)
+     }))
+   }
    textures[name] = frames
- }
- 
++}
++
 +// ================= 叠加层 =================
 +// 和动作的区别：动作是整帧替换，同一时刻只能有一个；叠加层是"角色照常演，额外再画几层"。
 +// 外部按数量驱动（主进程每秒数一遍在跑的子代理个数 → pet:overlay），所以这里只做增删同步。
@@ -919,12 +1122,44 @@
 +    console.log('[子代理] 都跑完了 → 鲸鱼沉入')
 +    if (textures['subagent_out']) requestAction('subagent_out', 'external')
 +  }
-+}
-+
+ }
+ 
  function updateTitle() {
    if (pet) document.title = `PetPet - ${pet.name}`
++}
++
++// ================= 摔倒（连点触发） =================
++// 用户猛戳她够多次（RAPID_WINDOW 内 RAPID_AFTER 下）就绊一跤：fall -> sit -> recover
++// 三段，素材来自"摔倒视频.mp4"，构建见 D:\序列帧动画\tools\build_fall.py。
++// 这里只管三个时刻：什么时候摔、什么时候起、什么时候算摔完了。
++const FALL_SEQ = ['fall', 'sit', 'recover']
++
++// 三段里任意一段在播 = 正在摔。用它当"点击锁"：摔的过程中点她没反应。
++// 直接看 currentAction 而不是另立一个布尔位——锁的开关自动跟着动作走，
++// 不存在"忘了解锁把她锁死"的情况（用户从菜单手动切走也一样解得掉）。
++function inFallSeq(): boolean {
++  return FALL_SEQ.indexOf(currentAction) >= 0
++}
++
++// 摔倒的准入：她手上有正事的时候不摔。
++// 端着碗吃（Claude 在干活）和低头看脚边的鲸鱼（子代理在跑）都是**外部信号**驱动的状态，
++// 爬起来之后没人会把她送回那个状态——一跤把"正在干活"摔没了，用户回到电脑前会发现
++// 她空着手站在那儿。其余状态（待机、挥手、比心）本来就随时会被打断，猛戳时照摔。
++function canTrip(): boolean {
++  if (subagentActive) return false
++  // workAction 是"干活时该端哪碗饭"（eat / eat_mid），端着碗的时候 currentAction 就是它
++  if (currentAction === workAction) return false
++  // 表还在后台补的时候别摔（loadPet 里各动作是并行加载的），否则 requestAction 会
++  // 静默丢弃——她已经"摔"了但画面上什么都没发生，下一次得重新戳够 8 下
++  //
++  // 三段**缺任何一张**都不摔，不只是 fall：链子断在哪一段，currentAction 就永久停在那一段，
++  // 而 inFallSeq() 正是拿 currentAction 当点击锁的——等于左键被锁死、点她毫无反应，只能重启。
++  // （recover 52×545 那种超宽表在纹理上限边缘，静默失败的风险不是假想的。）
++  return FALL_SEQ.every((n) => !!textures[n] && textures[n].length > 0)
  }
-@@ -356,13 +644,13 @@
+ 
+ // ================= 动作播放 =================
+@@ -356,13 +713,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -940,7 +1175,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -394,13 +682,18 @@
+@@ -394,13 +751,38 @@
      })
    }
  
@@ -952,6 +1187,26 @@
 -  // 行为链调度：仅自动行为源（random/transition）挂转移定时器——
 -  // 用户手动/提醒进入的动作不设转移（state-priority 设计意图：手动切换不被自动打断）
 -  if (source === 'random' || source === 'transition') scheduleTransition(name)
++  // 坐地上这一段自己带起身计时器：它是 hold + loop:false 的组合（PIXI 播完停在末帧），
++  // 什么时候切 recover 完全由这里说了算。计时从**坐下的那一刻**起算，理由见 SIT_HOLD_MS。
++  // 换到任何别的动作都先把计时器撤掉，免得它到点了还去切（回调里那道 currentAction
++  // 判断是第二层保险）。
++  if (fallTimer) { clearTimeout(fallTimer); fallTimer = null }
++  if (name === 'sit') {
++    fallTimer = setTimeout(() => {
++      fallTimer = null
++      if (currentAction !== 'sit') return
++      requestAction('recover', 'click')
++      // recover 的表没加载出来时 requestAction 会**静默早退**（缺素材、或精灵表超纹理上限时
++      // 静默失败），currentAction 就一直停在 'sit'——而 inFallSeq() 是拿 currentAction 当
++      // 点击锁的，等于左键被永久锁死（点她毫无反应、只能重启）。少播一段起身动作无所谓，
++      // 锁死不行，所以这里兜一步：请求没生效就回待机。
++      if (currentAction === 'sit') {
++        console.warn('[摔倒] recover 没播起来（表缺失？），回退 idle 解锁点击')
++        requestAction('idle', 'click')
++      }
++    }, SIT_HOLD_MS)
++  }
 +  // 行为链调度：自动行为源（random/transition）和一次性动作（ONESHOT_ACTIONS：
 +  // wave/heart/putaway）都挂转移定时器——后者必须回 idle，否则 loop:false 会定格在末帧、
 +  // loop:true 会永远循环下去。用户手动/提醒进入的循环动作不设转移（手动切换不被自动打断）。
@@ -962,7 +1217,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +719,19 @@
+@@ -426,12 +808,19 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -988,7 +1243,7 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +754,32 @@
+@@ -454,14 +843,32 @@
  }
  
  // ================= 气泡 =================
@@ -1024,7 +1279,7 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -485,7 +803,16 @@
+@@ -485,7 +892,16 @@
  // ================= 文案数据优先（v3 数据下沉） =================
  // pet.json 的 bubbles / diary / label 优先，代码常量仅作兜底（docs/08 §2.2）
  function bubblePool(): string[] {
@@ -1042,7 +1297,7 @@
  }
  
  function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
-@@ -515,6 +842,7 @@
+@@ -515,6 +931,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -1050,7 +1305,7 @@
  }
  
  async function submitReminder() {
-@@ -590,12 +918,84 @@
+@@ -590,11 +1007,88 @@
        app.ticker.stop()
      }
    })
@@ -1058,6 +1313,7 @@
 +  // 干活时循环吃饭，干完了收碗回待机。走 external 源——它不挂转移定时器（见 playAction），
 +  // 所以吃饭会一直循环下去；结束信号来了才由 putaway（一次性动作）接回待机。
 +  window.petAPI.onPetState((state) => {
++    externalState = state
 +    console.log(`[状态] 收到 ${state}，当前动作 ${currentAction}，eat 纹理${textures['eat'] ? '已就绪' : '未就绪'}`)
 +    if (state === 'working') {
 +      // 只在"从待机进入干活"时掷一次骰子（working 信号每次发消息都会来一遍，
@@ -1097,7 +1353,7 @@
  // ================= 随机行为 =================
  // P0：随机触发经 requestAction('random') 仲裁——只在待机时触发（守卫已在 shouldPlay），
  // 且回 idle 带守卫：仅当“当前仍是本次随机动作”时才回（修复：用户/提醒打断后不再被强制拉回 idle）
- 
++
 +// 按权重把基础动作换成别的动作：pet.json 的 `actions.<基础动作>.variants`。
 +// 鲸鱼娘配了两处——干活时 10% 把 eat 换成 eat_mid（中口吃）、点她时 8% 把 wave 换成 smug（屑表情）。
 +// 权重按百分比理解：变体权重之和就是"换掉"的概率，剩下的归基础动作；没配 variants 时永远返回基础动作，
@@ -1120,6 +1376,10 @@
 +// 所以单独存一份。
 +let workAction = 'eat'
 +
++// 最近一次外部状态信号。用来回答"这个动作播完之后她该回哪儿"——回待机是默认答案，
++// 但 Claude 还在干活的时候正确得多半是回去接着吃（见 scheduleTransition）。
++let externalState = 'idle'
++
 +// 收碗动作：默认 'putaway'（小口吃那条）。变体动作可以在 variants 里用 putaway 指定自己那条——
 +// 中口吃放下的是中碗，拿小口吃的收碗动作接会跳（实测接缝 23.46，用自己那条只有 10.75）。
 +function pickPutawayAction(action: string): string {
@@ -1131,11 +1391,10 @@
 +  }
 +  return 'putaway'
 +}
-+
+ 
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
- // 有 transitions 则按权重转移（transition 源），否则回 idle（init 源）
-@@ -603,7 +1003,11 @@
+@@ -603,7 +1097,11 @@
    if (transitionTimer) { clearTimeout(transitionTimer); transitionTimer = null }
    const act = pet?.actions?.[name]
    if (!act) return
@@ -1148,7 +1407,23 @@
    transitionTimer = setTimeout(() => {
      transitionTimer = null
      if (!pet || currentAction !== name) return
-@@ -652,6 +1056,9 @@
+@@ -620,7 +1118,14 @@
+         }
+       }
+     }
+-    // 无转移链 → 回 idle（init 源，绕开 random 源互斥守卫）
++    // 无转移链 → 该回哪儿回哪儿。默认是待机（init 源，绕开 random 源互斥守卫）；
++    // 但外部状态还是 working 的话，这个动作多半是打断吃饭播出来的（点她一下、提醒弹出来），
++    // 播完应该回去端着碗，而不是空着手站在那儿发愣。主进程只在状态**变化**时才发信号，
++    // 点一下不会动状态文件，所以这一次没人会替她回到吃饭——得在这儿自己接上。
++    if (externalState === 'working' && !subagentActive && textures[workAction]) {
++      requestAction(workAction, 'external')
++      return
++    }
+     requestAction('idle', 'init')
+   }, durMs)
+ }
+@@ -652,6 +1157,9 @@
  // ================= 启动 =================
  // P0-2：可见的错误反馈（不透明卡片，替代透明窗口里的静默失败）
  function showFatal(msg: string) {
@@ -1158,6 +1433,7 @@
    const bubble = document.getElementById('bubble')!
    bubble.textContent = '⚠️ ' + msg
    bubble.classList.remove('hidden')
+
 --- a/viewer/src/state-priority.ts
 +++ b/viewer/src/state-priority.ts
 @@ -3,7 +3,7 @@
@@ -1199,17 +1475,66 @@
    if (req.source === 'random') return currentAction === 'idle'
    if (req.source === 'transition') return true
    return priorityOf(req.name) > priorityOf(currentAction)
---- a/viewer/preload.cjs
-+++ b/viewer/preload.cjs
-@@ -23,5 +23,11 @@
-   notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
-   openDiary: (petId) => ipcRenderer.send('diary:open', petId),
-   onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
-+  notifyReminderClosed: () => ipcRenderer.send('reminder:panel-closed'),  // 面板关掉 → 主进程恢复"不抢焦点"
-   onVisibility: (cb) => ipcRenderer.on('pet:visibility', (_e, visible) => cb(visible)),  // P2-5: 隐藏时暂停动画
-+  onPetState: (cb) => ipcRenderer.on('pet:state', (_e, state) => cb(state)),  // 外部状态信号（Claude 在干活 → 循环吃饭）
-+  onOverlay: (cb) => ipcRenderer.on('pet:overlay', (_e, spec) => cb(spec)),  // 叠加层数量（当前未启用，代码留着以后做道具/特效）
-+  onSubagent: (cb) => ipcRenderer.on('pet:subagent', (_e, n) => cb(n)),  // 子代理数量：>0 她停下看鲸鱼，回到 0 鲸鱼沉入
-+  onRehit: (cb) => ipcRenderer.on('pet:rehit', (_e, p) => cb(p)),  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
-+  onCursor: (cb) => ipcRenderer.on('pet:cursor', (_e, p) => cb(p)), // 60ms 一次的光标位置（穿透态下 mousemove 到不了渲染层）
- })
+
+--- a/viewer/pet-import.cjs
++++ b/viewer/pet-import.cjs
+@@ -20,6 +20,14 @@
+ const os = require('os')
+ const { execFile } = require('child_process')
+ 
++// Windows 上必须点名系统自带的 bsdtar（C:\Windows\System32\tar.exe），**不能**用裸名 'tar' 走 PATH：
++// 装了 Git 的机器上 PATH 里的 tar 是 GNU tar，它不认 zip（报 "This does not look like a tar
++// archive"），于是「导入宠物包」在这类机器上必然失败——而这正是我们的主要用户群。
++// 顺带一个更隐蔽的后果：解压前的预算校验靠 `tar -tvf` 的字段位置取 size，GNU tar 的列排布不同，
++// 会解析出空数组，让"总量/单文件/压缩比"三条上限**全部静默失效**。
++const SYS_TAR = 'C:/Windows/System32/tar.exe'
++const TAR = process.platform === 'win32' && fs.existsSync(SYS_TAR) ? SYS_TAR : 'tar'
++
+ const ID_RE = /^[a-z0-9_-]+$/
+ const MAX_TEXTURE_WIDTH = 16384
+ const MAX_TEXTURE_HEIGHT = 16384  // AI 工具审计 V-01：此前只查宽不查高（1024×1亿 头可通过 → OOM）
+@@ -212,12 +220,11 @@
+     if (!fs.existsSync(abs)) {
+       return { ok: false, error: `动作 ${name} 的精灵表不存在：${file}` }
+     }
+-    // 纹理上限：帧宽×帧数 或 文件实际宽高/总像素，都查（AI 工具审计 V-01 加固）
+-    const frames = act.frames || 1
+-    const frameWidth = act.frameWidth || pet.cellWidth || 0
+-    if (frameWidth > 0 && frameWidth * frames > MAX_TEXTURE_WIDTH) {
+-      return { ok: false, error: `动作 ${name} 帧宽×帧数 = ${frameWidth}×${frames} = ${frameWidth * frames}px 超过 16384px 上限` }
+-    }
++    // 纹理上限：只查文件的**真实宽高/总像素**（AI 工具审计 V-01 加固）。
++    // 这里原来还有一条"帧宽×帧数"的预估，2026-09-21 删了：它假设所有帧横着排成一行，
++    // 而精灵表是可以折行的（一张 8720x2560 里放 52 帧，每行 16 帧），老公式会算出
++    // 28340 这种根本没发生过的宽度，把合法包拦在门外（加摔倒动作时就是这么炸的）。
++    // 下面几行读的就是文件头，那才是事实。
+     // 只读头部（不再整文件读入，V-02）；按扩展名解析实际尺寸，统一查宽/高/总像素（V-01）
+     // A5-CES-003：解析失败必须 fail-closed（未知格式/损坏头/尺寸头超扫描范围一律拒绝）
+     const head = readHead(abs, 65536)
+@@ -251,7 +258,7 @@
+ function unzipTo(zipPath, destDir) {
+   return new Promise((resolve, reject) => {
+     const isWin = process.platform === 'win32'
+-    const tool = isWin ? 'tar' : 'unzip'
++    const tool = isWin ? TAR : 'unzip'
+     const args = isWin ? ['-xf', zipPath, '-C', destDir] : ['-o', zipPath, '-d', destDir]
+     execFile(tool, args, { timeout: 30000 }, (err) => {
+       if (err) reject(new Error(`系统解压失败（${tool}）：${err.message}`))
+@@ -264,7 +271,7 @@
+ function listZipEntries(zipPath) {
+   return new Promise((resolve, reject) => {
+     const isWin = process.platform === 'win32'
+-    const tool = isWin ? 'tar' : 'unzip'
++    const tool = isWin ? TAR : 'unzip'
+     const args = isWin ? ['-tf', zipPath] : ['-Z1', zipPath]
+     execFile(tool, args, { timeout: 30000 }, (err, stdout) => {
+       if (err) reject(new Error(`读取压缩包条目失败（${tool}）：${err.message}`))
+@@ -278,7 +285,7 @@
+ function listZipSizes(zipPath) {
+   return new Promise((resolve, reject) => {
+     const isWin = process.platform === 'win32'
+-    const tool = isWin ? 'tar' : 'unzip'
++    const tool = isWin ? TAR : 'unzip'
+     const args = isWin ? ['-tvf', zipPath] : ['-l', zipPath]
+     execFile(tool, args, { timeout: 30000 }, (err, stdout) => {
+       if (err) reject(new Error(`读取压缩包大小预算失败（${tool}）：${err.message}`))
