@@ -9,8 +9,10 @@
 # 改了九件事：① 干活时的动作可按权重换（eat.variants）② 收碗可分开（variants[].putaway）
 # ③ 外部状态增加 interrupted，按 reactions.interrupted 播反应动作
 # ④ loop:false 的动作一律按一次性处理（播完回待机，不再靠手写名单）
-# ⑤ 窗口几何 IPC 加 NaN 守卫：setPosition / setSize / menu.popup 收到坏坐标会在主进程抛
-#    未捕获异常、整个 app 弹框崩掉。注意 Math.round(NaN) 仍是 NaN，光靠 Math.round 挡不住
+# ⑤ 窗口几何 IPC 加坐标守卫：setPosition / setSize / menu.popup 收到坏坐标会在主进程抛
+#    未捕获异常、整个 app 弹框崩掉。注意 Math.round(NaN) 仍是 NaN，光靠 Math.round 挡不住；
+#    判有限也不够——值超出 32 位整数范围一样抛 conversion failure（2026-09-22 实测崩在
+#    setPosition 的第二个参数上），所以守卫连范围一起管，三处原生调用再各包一层 try/catch
 # ⑥ 窗口默认 focusable:false，点她不再把焦点从终端抢走；提醒面板要打字，走
 #    openReminderWithFocus() 临时开回来，面板关掉后由 reminder:panel-closed 复位
 # ⑦ petpet:// 协议补 corsEnabled：少了它，渲染层从 file:// fetch 会被判跨源拦掉，
@@ -247,7 +249,7 @@
  
    mainWindow.on('closed', () => { mainWindow = null })
  }
-@@ -231,6 +306,16 @@
+@@ -231,6 +306,21 @@
    })
  }
  
@@ -255,16 +257,21 @@
 +// Electron 的 setPosition/setSize/popup 只吃有限整数，喂进 NaN 会在原生层抛 TypeError，
 +// 而 ipcMain 监听器里的异常没人接 = 主进程未捕获异常直接弹框崩掉。
 +// 注意 Math.round(NaN) 仍是 NaN，所以光靠 Math.round 挡不住，必须显式判有限。
++// 判有限还不够：这些值最终要转成 32 位整数，超范围同样抛 conversion failure
++// （2026-09-22 实测崩在 setPosition 的第二个参数上）。窗口放到 int32 之外本来也没有意义，
++// 所以范围一起夹掉。
++const INT32_MAX = 2147483647
 +function toWinInt(v, min) {
 +  const n = Math.round(Number(v))
 +  if (!Number.isFinite(n)) return null
-+  return min === undefined ? n : Math.max(min, n)
++  const clamped = Math.min(INT32_MAX, Math.max(-INT32_MAX, n))
++  return min === undefined ? clamped : Math.max(min, clamped)
 +}
 +
  // 右键菜单：原生 macOS Menu.popup（自动毛玻璃/定位，替代 HTML 自绘）
  ipcMain.handle('menu:showContext', (_evt, x, y) => {
    const petName = currentPetName || '宠物'
-@@ -249,7 +334,10 @@
+@@ -249,7 +339,14 @@
    template.push({ type: 'separator' })
    template.push({ label: '↺ 重置大小', click: () => send('view:reset') })
    const menu = Menu.buildFromTemplate(template)
@@ -272,11 +279,15 @@
 +  // 坐标坏值时退回默认位置（popup 传 NaN 同样会抛）
 +  const px = toWinInt(x)
 +  const py = toWinInt(y)
-+  menu.popup(px === null || py === null ? {} : { x: px, y: py })
++  try {
++    menu.popup(px === null || py === null ? {} : { x: px, y: py })
++  } catch (err) {
++    console.warn('[PetPet] menu.popup 失败：', px, py, err && err.message)
++  }
  })
  
  function toggleWindow() {
-@@ -270,13 +358,21 @@
+@@ -270,13 +367,21 @@
  }
  
  // P0-4: 从托盘/菜单打开提醒面板前，先解除窗口穿透 + 抢焦点（否则面板点不动、键盘输不进去）
@@ -298,7 +309,7 @@
  
  // ---------- IPC：宠物资产读取 ----------
  // 列出 ~/.petpet/pets 下的宠物
-@@ -285,12 +381,37 @@
+@@ -285,12 +390,37 @@
      const dirs = fs.readdirSync(PETS_ROOT, { withFileTypes: true })
        .filter(d => d.isDirectory())
        .map(d => d.name)
@@ -337,7 +348,7 @@
  
  // 读取 pet.json
  ipcMain.handle('pet:load', (_evt, petId) => {
-@@ -303,6 +424,7 @@
+@@ -303,6 +433,7 @@
      // D-5: 数值上限校验（2026-08-09，外部审计指出恶意 pet.json 可构造资源炸弹；上限对齐 pipeline/validate_pet.py 纹理铁律）
      // AI 工具审计 V-05：补乘积校验（frameWidth×frames 单查必过但组合可构造 819 万像素宽纹理）+ actions 键数上限
      const MAX_TEXTURE = 16384, MAX_FRAMES = 500, MAX_FPS = 120, MAX_ACTIONS = 50
@@ -345,7 +356,7 @@
      if (data && data.actions && typeof data.actions === 'object') {
        const actionCount = Object.keys(data.actions).length
        if (actionCount > MAX_ACTIONS) return { error: `actions 键数 ${actionCount} 超过上限(≤${MAX_ACTIONS})` }
-@@ -314,9 +436,32 @@
+@@ -314,9 +445,32 @@
          if (fh != null && (!Number.isFinite(Number(fh)) || Number(fh) < 1 || Number(fh) > MAX_TEXTURE)) return { error: `action ${name}: frameHeight 超上限(≤${MAX_TEXTURE})` }
          if (a.frames != null && (!Number.isFinite(Number(a.frames)) || Number(a.frames) < 1 || Number(a.frames) > MAX_FRAMES)) return { error: `action ${name}: frames 超上限(≤${MAX_FRAMES})` }
          if (a.fps != null && (!Number.isFinite(Number(a.fps)) || Number(a.fps) < 1 || Number(a.fps) > MAX_FPS)) return { error: `action ${name}: fps 超上限(≤${MAX_FPS})` }
@@ -381,7 +392,7 @@
        }
      }
      return data
-@@ -390,22 +535,63 @@
+@@ -390,22 +544,73 @@
    })
  }
  
@@ -417,7 +428,11 @@
 +  const nw = toWinInt(w, 60)
 +  const nh = toWinInt(h, 60)
 +  if (nw === null || nh === null) return console.warn('[PetPet] view:setSize 收到非法尺寸：', w, h)
-+  mainWindow.setSize(nw, nh)
++  try {
++    mainWindow.setSize(nw, nh)
++  } catch (err) {
++    return console.warn('[PetPet] setSize 失败：', nw, nh, err && err.message)
++  }
 +  // 只在没生效时吭声，方便以后排查（这个窗口有过 resizable 导致 setSize 被吃掉的先例）
 +  const [aw, ah] = mainWindow.getSize()
 +  if (aw !== nw || ah !== nh) {
@@ -433,7 +448,13 @@
 +  const nx = toWinInt(x)
 +  const ny = toWinInt(y)
 +  if (nx === null || ny === null) return console.warn('[PetPet] view:move 收到非法坐标：', x, y)
-+  mainWindow.setPosition(nx, ny)
++  // ipcMain 监听器里的异常没人接，原生层一次报错就是整个主进程弹框崩掉。移动窗口失败
++  // 远不该有这个代价，兜住（2026-09-22）
++  try {
++    mainWindow.setPosition(nx, ny)
++  } catch (err) {
++    return console.warn('[PetPet] setPosition 失败：', nx, ny, err && err.message)
++  }
 +  nudgeHitTest()
 +  scheduleUiStateSave()
  })
@@ -448,7 +469,7 @@
  })
  
  // 查询窗口当前位置（拖拽用）
-@@ -541,7 +727,7 @@
+@@ -541,7 +746,7 @@
      width: 300,
      height: 400,
      x,
@@ -457,7 +478,7 @@
      frame: false,
      // P1-8: 日记窗口可拖动、可缩放（此前不可移动不可缩放，挡住内容只能退出重开）
      movable: true,
-@@ -574,7 +760,10 @@
+@@ -574,7 +779,10 @@
  
  // 设置提醒：{ at: ms 时间戳, repeat: 'none'|'daily'|'weekly', text }
  ipcMain.handle('reminder:set', (_evt, spec) => {
@@ -469,7 +490,7 @@
      return { error: '时间无效' }
    }
    const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
-@@ -609,23 +798,134 @@
+@@ -609,23 +817,134 @@
    }
    send('reminder:fire', { id, text: r.text })
    appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
@@ -611,7 +632,7 @@
  
  // ---------- 生命周期 ----------
  // 截图测试模式：electron . --screenshot=/tmp/x.png [--action=run]
-@@ -635,6 +935,9 @@
+@@ -635,6 +954,9 @@
  const openReminderArg = process.argv.includes('--open-reminder')
  
  app.whenReady().then(() => {
@@ -621,7 +642,6 @@
    registerPetpetProtocol()  // N-3：自定义协议（CSP 已放行 petpet:）
    createWindow()
    // macOS Dock 图标：示例宠物头像（内嵌 base64，打包后有效；换宠物时替换此图标）
-
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
 @@ -23,6 +23,12 @@
@@ -637,7 +657,6 @@
 +  onCursor: (cb) => ipcRenderer.on('pet:cursor', (_e, p) => cb(p)), // 60ms 一次的光标位置（穿透态下 mousemove 到不了渲染层）
  })
  
-
 --- a/viewer/src/main.ts
 +++ b/viewer/src/main.ts
 @@ -4,7 +4,8 @@
@@ -704,7 +723,7 @@
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -93,18 +121,37 @@
+@@ -93,18 +121,44 @@
  } catch { /* ignore */ }
  let pingpongDir = 1
  let bubbleTimer: ReturnType<typeof setTimeout> | null = null
@@ -718,6 +737,13 @@
  let curWinH = 320
  let curWinX = 0
  let curWinY = 0
++
++// 窗口坐标的合理范围。屏幕坐标不可能到这个量级，而主进程那道守卫只挡 NaN 不挡范围
++// （2026-09-22 就是被超范围的值崩的），所以发出去之前先在这里看住。
++const WIN_COORD_LIMIT = 1e6
++function sanePos(v: number) {
++  return Number.isFinite(v) && Math.abs(v) < WIN_COORD_LIMIT
++}
 +// 叠加层：key = overlays 里的名字，值是按 slot 索引对齐的实例数组（空位为 null）。
 +// 纹理单独缓存，切动作时不清——叠加层和动作是两套生命周期。
 +const overlayTex = new Map<string, PIXI.Texture[]>()
@@ -742,7 +768,7 @@
  
  // ================= 初始化 =================
  async function init() {
-@@ -114,6 +161,7 @@
+@@ -114,6 +168,7 @@
      resizeTo: window,
      resolution: Math.min(window.devicePixelRatio || 1, 2)
    })
@@ -750,7 +776,7 @@
    document.getElementById('stage')?.replaceWith(app.canvas)
    app.canvas.style.width = '100%'
    app.canvas.style.height = '100%'
-@@ -124,33 +172,78 @@
+@@ -124,33 +179,84 @@
  
    // 拖拽移动窗口
    let dragging = false
@@ -807,7 +833,13 @@
 +    const nx = Math.round(winStart.x + (e.screenX - startScreen.x))
 +    const ny = Math.round(winStart.y + (e.screenY - startScreen.y))
 +    dragMoveCount++
-+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return
++    // 光判有限不够：值有限但离谱（量级远超屏幕）时主进程那道守卫照样放行，最后在原生层
++    // setPosition 抛 conversion failure，而 ipcMain 里的异常没人接 = 主进程弹框崩掉
++    // （2026-09-22）。这里挡下来，并把全部输入打出来——静默跳过会让问题查不到来源。
++    if (!sanePos(nx) || !sanePos(ny)) {
++      console.warn(`[坐标] 拖拽算出离谱坐标 x=${nx} y=${ny} winStart=${winStart.x},${winStart.y} screen=${e.screenX},${e.screenY} start=${startScreen.x},${startScreen.y}`)
++      return
++    }
 +    curWinX = nx
 +    curWinY = ny
 +    window.petAPI.moveWindow(nx, ny)
@@ -836,7 +868,7 @@
    function uiRects() {
      const out: { x: number; y: number; w: number; h: number }[] = []
      for (const el of [
-@@ -168,14 +261,41 @@
+@@ -168,14 +274,41 @@
      })
      return out
    }
@@ -882,7 +914,7 @@
        lastIgnore = shouldIgnore
        window.petAPI.setIgnoreMouse(shouldIgnore, true)
      }
-@@ -184,17 +304,86 @@
+@@ -184,17 +317,86 @@
    document.addEventListener('pointermove', updateMouseIgnore, true)
    // 初始穿透
    setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
@@ -972,7 +1004,7 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -338,17 +527,185 @@
+@@ -338,17 +540,185 @@
    const cols = Math.max(1, Math.floor(tex.width / cw))
    const frames: PIXI.Texture[] = []
    for (let i = 0; i < act.frames; i++) {
@@ -1159,7 +1191,7 @@
  }
  
  // ================= 动作播放 =================
-@@ -356,13 +713,13 @@
+@@ -356,13 +726,13 @@
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -1175,7 +1207,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -394,13 +751,38 @@
+@@ -394,13 +764,38 @@
      })
    }
  
@@ -1217,7 +1249,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +808,19 @@
+@@ -426,12 +821,21 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -1227,11 +1259,13 @@
 -  curWinY = newY
 -  curWinW = newW
 -  curWinH = newH
-+  // 同上：curWin* 任一被污染成 NaN 就跳过，别把坏值送去主进程
-+  if (Number.isFinite(newX) && Number.isFinite(newY)) {
++  // 同上：curWin* 任一被污染就跳过，别把坏值送去主进程
++  if (sanePos(newX) && sanePos(newY)) {
 +    window.petAPI.moveWindow(newX, newY)
 +    curWinX = newX
 +    curWinY = newY
++  } else {
++    console.warn(`[坐标] 缩放对中算出离谱坐标 x=${newX} y=${newY} curWin=${curWinX},${curWinY} curSize=${curWinW}x${curWinH} new=${newW}x${newH}`)
 +  }
 +  if (Number.isFinite(newW) && Number.isFinite(newH)) {
 +    window.petAPI.setWindowSize(newW, newH)
@@ -1243,7 +1277,7 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +843,32 @@
+@@ -454,14 +858,32 @@
  }
  
  // ================= 气泡 =================
@@ -1279,7 +1313,7 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -485,7 +892,16 @@
+@@ -485,7 +907,16 @@
  // ================= 文案数据优先（v3 数据下沉） =================
  // pet.json 的 bubbles / diary / label 优先，代码常量仅作兜底（docs/08 §2.2）
  function bubblePool(): string[] {
@@ -1297,7 +1331,7 @@
  }
  
  function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
-@@ -515,6 +931,7 @@
+@@ -515,6 +946,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -1305,7 +1339,7 @@
  }
  
  async function submitReminder() {
-@@ -590,11 +1007,88 @@
+@@ -590,11 +1022,88 @@
        app.ticker.stop()
      }
    })
@@ -1394,7 +1428,7 @@
  
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
-@@ -603,7 +1097,11 @@
+@@ -603,7 +1112,11 @@
    if (transitionTimer) { clearTimeout(transitionTimer); transitionTimer = null }
    const act = pet?.actions?.[name]
    if (!act) return
@@ -1407,7 +1441,7 @@
    transitionTimer = setTimeout(() => {
      transitionTimer = null
      if (!pet || currentAction !== name) return
-@@ -620,7 +1118,14 @@
+@@ -620,7 +1133,14 @@
          }
        }
      }
@@ -1423,7 +1457,7 @@
      requestAction('idle', 'init')
    }, durMs)
  }
-@@ -652,6 +1157,9 @@
+@@ -652,6 +1172,9 @@
  // ================= 启动 =================
  // P0-2：可见的错误反馈（不透明卡片，替代透明窗口里的静默失败）
  function showFatal(msg: string) {
@@ -1433,7 +1467,6 @@
    const bubble = document.getElementById('bubble')!
    bubble.textContent = '⚠️ ' + msg
    bubble.classList.remove('hidden')
-
 --- a/viewer/src/state-priority.ts
 +++ b/viewer/src/state-priority.ts
 @@ -3,7 +3,7 @@
@@ -1475,7 +1508,6 @@
    if (req.source === 'random') return currentAction === 'idle'
    if (req.source === 'transition') return true
    return priorityOf(req.name) > priorityOf(currentAction)
-
 --- a/viewer/pet-import.cjs
 +++ b/viewer/pet-import.cjs
 @@ -20,6 +20,14 @@
