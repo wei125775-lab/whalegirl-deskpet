@@ -98,7 +98,15 @@
 #      GNU tar，它不认 zip；更隐蔽的是解压前的预算校验靠 `tar -tvf` 的字段位置取 size，GNU tar
 #      列排布不同、解析出空数组，"总量/单文件/压缩比"三条上限**全部静默失效**。点名用系统自带的
 #      C:/Windows/System32/tar.exe
+# ⑳ 修 ⑲ 带出来的回归——'idle' 被挡在白名单外：⑲ 把解析从"无条件置回 idle 再读"改成
+#    "解析成功才认这一版"，判定写成了 EXTERNAL_STATES.has(obj.state)，而那个白名单是给
+#    "要透传给渲染层的信号"用的（working / interrupted），'idle' 自己不在里面。于是 hook
+#    写 idle 时 lastFileState 不更新、永远停在 'working'，内容去重又让同样的 working 不再
+#    发：状态一进工作态就再也回不去，表现为"干完活她一直端着碗吃"（2026-09-22 用户报
+#    "她现在还在吃饭"）。⑲ 的初衷（认不出来的值保留上一版，别让撕裂读把她打回待机）不变，
+#    只把 'idle' 补进白名单
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
+
 
 
 
@@ -490,7 +498,7 @@
      return { error: '时间无效' }
    }
    const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
-@@ -609,23 +817,134 @@
+@@ -609,23 +817,137 @@
    }
    send('reminder:fire', { id, text: r.text })
    appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
@@ -519,8 +527,11 @@
 +const STATE_STALE_MS = 30 * 60 * 1000   // 太久没更新说明 Claude 那边断了，别让桌宠一直吃
 +// 外部状态信号的白名单：hook 写什么就往渲染层透传什么。
 +// 原先只认 'working'、其余一律当 idle——于是 'interrupted'（用户按 Esc 打断，
-+// 由 interrupt-watch.mjs 写出）被吞掉，她打完断还在端着碗吃。认不出来的值仍按 idle。
-+const EXTERNAL_STATES = new Set(['working', 'interrupted'])
++// 由 interrupt-watch.mjs 写出）被吞掉，她打完断还在端着碗吃。改成白名单时又漏了 'idle'
++// 自己：idle 命不中白名单就不更新 lastFileState，状态一进 working 就再也回不去，
++// 她干完活一直端着碗吃（2026-09-22 用户报"她现在还在吃饭"）。认不出来的值保留上一版，
++// 写了一半的撕裂读宁可不管，也别凭空把她打回待机。
++const EXTERNAL_STATES = new Set(['working', 'interrupted', 'idle'])
 +let lastStateMtime = 0
 +// 拆成两个变量。合用一个会出事：子代理跑完时要把 lastStateSent 清空以逼下一轮重发
 +// （见 pollSubagents），若它还兼任"文件里存的是什么"，这一清就把记忆一并抹了，
@@ -632,7 +643,7 @@
  
  // ---------- 生命周期 ----------
  // 截图测试模式：electron . --screenshot=/tmp/x.png [--action=run]
-@@ -635,6 +954,9 @@
+@@ -635,6 +957,9 @@
  const openReminderArg = process.argv.includes('--open-reminder')
  
  app.whenReady().then(() => {
@@ -642,6 +653,7 @@
    registerPetpetProtocol()  // N-3：自定义协议（CSP 已放行 petpet:）
    createWindow()
    // macOS Dock 图标：示例宠物头像（内嵌 base64，打包后有效；换宠物时替换此图标）
+
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
 @@ -23,6 +23,12 @@
@@ -657,6 +669,7 @@
 +  onCursor: (cb) => ipcRenderer.on('pet:cursor', (_e, p) => cb(p)), // 60ms 一次的光标位置（穿透态下 mousemove 到不了渲染层）
  })
  
+
 --- a/viewer/src/main.ts
 +++ b/viewer/src/main.ts
 @@ -4,7 +4,8 @@
@@ -723,7 +736,7 @@
        showContextMenu: (x: number, y: number) => Promise<void>
        listActivity: (petId: string) => Promise<{ ts: number; mood: string; text: string }[]>
        onPetSwitch: (cb: (id: string) => void) => void
-@@ -93,18 +121,44 @@
+@@ -93,8 +121,10 @@
  } catch { /* ignore */ }
  let pingpongDir = 1
  let bubbleTimer: ReturnType<typeof setTimeout> | null = null
@@ -734,10 +747,10 @@
  let reminderBarOn = false
  // 渲染进程跟踪的窗口状态（初始 = 主进程创建尺寸/位置；本地维护，避免异步竞态漂移）
  let curWinW = 320
- let curWinH = 320
+@@ -102,9 +132,33 @@
  let curWinX = 0
  let curWinY = 0
-+
+ 
 +// 窗口坐标的合理范围。屏幕坐标不可能到这个量级，而主进程那道守卫只挡 NaN 不挡范围
 +// （2026-09-22 就是被超范围的值崩的），所以发出去之前先在这里看住。
 +const WIN_COORD_LIMIT = 1e6
@@ -751,7 +764,7 @@
 +// 子代理在不在跑。用独立状态位而不是从 currentAction 反推：退出信号来的时候
 +// 动作链可能正卡在出场/循环任意一段，靠动作名判断会漏。
 +let subagentActive = false
- 
++
  const WINDOW_W = 320
  const WINDOW_H = 320
  const BUBBLE_TEXTS = ['汪！', '摸摸我～', '今天也要开心哦！', '饿了…有吃的吗？', '(*^▽^*)']
@@ -1467,6 +1480,7 @@
    const bubble = document.getElementById('bubble')!
    bubble.textContent = '⚠️ ' + msg
    bubble.classList.remove('hidden')
+
 --- a/viewer/src/state-priority.ts
 +++ b/viewer/src/state-priority.ts
 @@ -3,7 +3,7 @@
@@ -1508,6 +1522,7 @@
    if (req.source === 'random') return currentAction === 'idle'
    if (req.source === 'transition') return true
    return priorityOf(req.name) > priorityOf(currentAction)
+
 --- a/viewer/pet-import.cjs
 +++ b/viewer/pet-import.cjs
 @@ -20,6 +20,14 @@
