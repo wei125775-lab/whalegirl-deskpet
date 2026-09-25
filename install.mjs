@@ -1,5 +1,5 @@
 /**
- * Install @wei125775-lab/whalegirl-deskpet into a dsh web profile.
+ * Install @wei125775-lab/whalegirl-deskpet into a dsh profile.
  *
  * Copies this package into <DSH_HOME>/profiles/<profile>/node_modules/ and
  * wires it into that profile's package.json (dependencies + dsh.profile.bundles).
@@ -7,15 +7,26 @@
  * module side effect (releasing the pet into $DSH_HOME/pets/) runs before the
  * pet registry scans that directory.
  *
+ * Works for an npm-installed dsh (web profile) and for the official desktop app
+ * (its own DSH_HOME + `desktop` profile) — pass --dsh-home / --profile, and for
+ * the desktop app also --desktop-app so the renderer installs through the pnpm
+ * bundled inside that app instead of the npm-global `dsh` CLI.
+ *
  * Run with: node install.mjs   (or double-click install.cmd)
- * Options:  --profile=<name>   pick a profile other than the auto-detected one
- *           --dry-run         show what would happen, change nothing
+ * Options:  --profile=<name>       pick a profile other than the auto-detected one
+ *           --dsh-home=<dir>       harness home (default: $DSH_HOME, else ~/.dsh)
+ *           --renderer-spec=<spec> what to install as the renderer, version included
+ *                                  (default: @linxin666/dsh-pet@latest)
+ *           --desktop-app=<dir>    official desktop app dir; install the renderer
+ *                                  with the pnpm bundled in it
+ *           --no-renderer          never auto-install the renderer
+ *           --dry-run              show what would happen, change nothing
  */
 
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const PKG_NAME = '@wei125775-lab/whalegirl-deskpet'
@@ -33,8 +44,19 @@ const flag = (name) => {
 const dryRun = flag('dry-run') !== undefined
 const skipRenderer = flag('no-renderer') !== undefined
 const wantProfile = flag('profile')
+const desktopApp = flag('desktop-app')
+/**
+ * 要装的渲染器 spec（可以带版本）。默认不带版本。
+ *
+ * **给 web profile 装时必须钉版本**：桌面版用的是 dsh 0.1.7，要 dsh-pet 0.4.2
+ * （它的 peerDeps 是 `dsh >=0.1.7-rc.1`），而 npm 全局的 dsh 是 0.1.5 —— 不钉版本
+ * 就会把 0.4.2 装进 0.1.5 的 profile 里，web 侧直接坏掉。所以：
+ *   web     -> --renderer-spec=@linxin666/dsh-pet@0.3.23
+ *   desktop -> --renderer-spec=@linxin666/dsh-pet@0.4.2
+ */
+const rendererSpec = flag('renderer-spec') || REQUIRED
 
-const dshHome = (process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
+const dshHome = flag('dsh-home') || (process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
 
 function fail(message) {
   console.error('ERROR: ' + message)
@@ -55,10 +77,14 @@ function resolveProfile() {
   }
   // Prefer the profile that actually has the pet plugin — that is the one whose
   // bundles list needs this entry to mean anything.
-  for (const name of names) {
-    if (existsSync(join(root, name, 'node_modules', ...REQUIRED.split('/')))) {
-      return { name, dir: join(root, name) }
-    }
+  const withRenderer = names.filter((name) =>
+    existsSync(join(root, name, 'node_modules', ...REQUIRED.split('/'))))
+  // 多个候选时**不能盲选**：readdirSync 的顺序在 Windows 上不是字母序，挑中的那个不可预期，
+  // 而挑错的代价是改了另一个 profile 的 bundles。以前这里是取循环里第一个命中的。
+  if (withRenderer.length === 1) return { name: withRenderer[0], dir: join(root, withRenderer[0]) }
+  if (withRenderer.length > 1) {
+    fail('several profiles have ' + REQUIRED + ' installed (' + withRenderer.join(', ') + ').\n' +
+      'Pass --profile=<name> to say which one to install into.')
   }
   if (names.includes('web')) return { name: 'web', dir: join(root, 'web') }
   if (names.length === 1) return { name: names[0], dir: join(root, names[0]) }
@@ -106,15 +132,58 @@ function storeDirs(profileDir) {
 }
 
 /**
+ * 用桌面版**自带的** pnpm 装渲染器，与它的运行时版本完全对齐。
+ *
+ * 官方侧边栏「插件」页走的就是这条命令：把 Electron 本体当 Node 用（ELECTRON_RUN_AS_NODE），
+ * 执行 app 内 `resources/runtime/pnpm/bin/pnpm.mjs`，cwd 是 profile 目录。不这么做就只能退回
+ * npm 全局的 `dsh` CLI —— 那是另一套版本（dsh 0.1.5 / pnpm 11.23），往 0.1.7 的 profile 里装
+ * 东西不合适。
+ *
+ * 和桌面版一样不给子进程 DSH_HOME：pnpm 只认 cwd，留着反而可能误导包脚本。
+ */
+function installRendererViaDesktopApp(profile, appDir) {
+  const exe = join(appDir, 'DeepSeek Harness.exe')
+  const pnpmEntry = join(appDir, 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.mjs')
+  const binDir = join(appDir, 'resources', 'runtime', 'bin')
+  if (!existsSync(exe) || !existsSync(pnpmEntry)) {
+    console.log('   在 ' + appDir + ' 里找不到 DeepSeek Harness.exe 或自带 pnpm，这条路径走不通。')
+    return false
+  }
+  const args = ['--expose-internals', pnpmEntry, 'add', rendererSpec]
+  const env = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: '1',
+    DSH_DESKTOP_NODE_EXECUTABLE: exe,
+    PATH: binDir + delimiter + (process.env.PATH ?? ''),
+  }
+  delete env.DSH_HOME
+  console.log('   ' + exe + ' ' + args.join(' '))
+  const r = spawnSync(exe, args, { cwd: profile.dir, stdio: 'inherit', env })
+  if (r.error !== undefined) {
+    console.log('   启动失败：' + r.error.message)
+    return false
+  }
+  if (r.status !== 0) {
+    console.log('   pnpm 退出码 ' + r.status + '（多半是网络或 registry 的问题）')
+    return false
+  }
+  return existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
+}
+
+/**
  * 没装渲染器就替你装上。
  *
- * 走 dsh 自己的 `plugin add`（= 转发给 pnpm）—— 实测它一条命令把两件事都做了：
+ * 默认走 dsh 自己的 `plugin add`（= 转发给 pnpm）—— 实测它一条命令把两件事都做了：
  * 装包 + 写进 `dsh.profile.bundles`，所以不用我们手动改 profile manifest。
+ * 给了 `--desktop-app` 时改走桌面版自带的 pnpm（见上）。
  *
  * 失败一律只警告、返回 false，绝不抛：素材这时已经放好了，最坏结果只是"暂时还看不到她"，
  * 按收尾那段手动装即可。返回是否装成。
  */
 function installRenderer(profile) {
+  if (desktopApp !== undefined && desktopApp !== '') {
+    return installRendererViaDesktopApp(profile, desktopApp)
+  }
   const cli = findDshCli()
   if (cli === undefined) {
     console.log('   找不到 dsh 命令行（PATH 上和 npm 全局都没有），没法自动装。')
@@ -122,7 +191,7 @@ function installRenderer(profile) {
   }
   const { storeDir, virtualStoreDir } = storeDirs(profile.dir)
   const args = [
-    'plugin', '--profile', profile.name, 'add', REQUIRED,
+    'plugin', '--profile', profile.name, 'add', rendererSpec,
     ...(storeDir === undefined ? [] : ['--store-dir=' + storeDir]),
     '--virtual-store-dir=' + virtualStoreDir,
   ]
@@ -145,6 +214,36 @@ function installRenderer(profile) {
     return false
   }
   return existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
+}
+
+/**
+ * 手动装渲染器的命令 —— dry-run 和收尾提示都要用，单独一处，免得两边说法不一致
+ * （以前收尾那段自己抄了一份 store 默认值，还不读 profile 的 .npmrc）。
+ * 返回的命令可能带换行。
+ */
+function rendererInstallHint(profile) {
+  if (desktopApp !== undefined && desktopApp !== '') {
+    return join(desktopApp, 'DeepSeek Harness.exe') + ' --expose-internals \\\n' +
+      '           "' + join(desktopApp, 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.mjs') + '" add ' + rendererSpec +
+      '\n         （先设 ELECTRON_RUN_AS_NODE=1，cwd 用 ' + profile.dir + '）'
+  }
+  const { storeDir, virtualStoreDir } = storeDirs(profile.dir)
+  return 'dsh plugin --profile ' + profile.name + ' add ' + rendererSpec +
+    (storeDir === undefined ? '' : '\n           "--store-dir=' + storeDir + '"') +
+    '\n           "--virtual-store-dir=' + virtualStoreDir + '"'
+}
+
+/**
+ * 渲染器是不是 bundle 型插件（manifest 带 `dsh.bundle.patch`）。
+ * 不是的话登记进 bundles 也没用，只会给 loader 添一条报错的 entry。
+ */
+function rendererDeclaresBundle(profile) {
+  try {
+    const manifest = join(profile.dir, 'node_modules', ...REQUIRED.split('/'), 'package.json')
+    return JSON.parse(readFileSync(manifest, 'utf8'))?.dsh?.bundle !== undefined
+  } catch {
+    return false
+  }
 }
 
 const profile = resolveProfile()
@@ -195,7 +294,7 @@ if (dryRun) {
   console.log('[dry-run] would register ' + PKG_NAME + ' in dependencies + bundles (pet v' + petVersion + ')')
   console.log('[dry-run] would patch @linxin666/dsh-pet phases with ' + 'whale-in / whale-loop / whale-out')
   if (!hasRenderer && !skipRenderer) {
-    console.log('[dry-run] would install the renderer:  dsh plugin --profile ' + profile.name + ' add ' + REQUIRED)
+    console.log('[dry-run] would install the renderer:  ' + rendererInstallHint(profile))
   }
   process.exit(0)
 }
@@ -273,6 +372,15 @@ if (!Array.isArray(profilePkg.dsh.profile.bundles)) {
 }
 const bundles = profilePkg.dsh.profile.bundles
 
+// 渲染器也得在 bundles 里。走 `dsh plugin add` 时它自己会登记，但走 `--desktop-app`
+// 那条路是直接调 pnpm 的 —— 只装了包、没登记，而 dsh-pet 带 `dsh.bundle.patch`，
+// 不在 bundles 里就**根本不会被加载**（症状：装完一切正常，宠物就是不出现）。
+// 补在登记自己之前，这样下一步的锚点查找才排得到它前面。
+if (!bundles.includes(REQUIRED) && rendererDeclaresBundle(profile)) {
+  bundles.push(REQUIRED)
+  console.log('note       : ' + REQUIRED + ' was not in bundles — registered it (pnpm 那条路不会自己登记)')
+}
+
 const existing = bundles.indexOf(PKG_NAME)
 if (existing !== -1) bundles.splice(existing, 1)
 const anchorAt = bundles.indexOf(ANCHOR)
@@ -294,15 +402,11 @@ try {
 
 console.log('')
 if (hasRenderer) {
-  console.log('Done. Restart DshDesktop to load the pet (pet v' + petVersion + ').')
+  console.log('Done. Restart dsh to load the pet (pet v' + petVersion + ').')
   console.log('The pet shows up as 鲸鱼娘 (id: whalegirl-hd) in the pet picker.')
   console.log('If it does not appear, restart once more — the pet directory is scanned during startup.')
 } else {
   // 收尾必须是"还差一步"，不能是乐观的 Done —— 否则人家装完重启、什么都没看到，只会以为这包是坏的。
-  const pnpmStore = process.env.LOCALAPPDATA
-    ? join(process.env.LOCALAPPDATA, 'pnpm', 'store')
-    : undefined
-  const virtualStore = join(profile.dir, 'node_modules', '.pnpm')
   console.log('!! She will NOT show up yet — this profile has no renderer.')
   console.log('')
   console.log('   ' + REQUIRED + ' is the plugin that actually draws her. Our package only')
@@ -314,13 +418,13 @@ if (hasRenderer) {
   console.log('   Either way works:')
   console.log('     - In the dsh UI: open the plugin market and search for "dsh-pet".')
   console.log('     - Or from a terminal:')
-  console.log('         dsh plugin --profile ' + profile.name + ' add ' + REQUIRED)
-  // 这两条路径要加引号：用户名或安装目录带空格时，照抄圆括号里的原样命令会被 cmd 拆成两个参数
-  if (pnpmStore !== undefined) console.log('           "--store-dir=' + pnpmStore + '"')
-  console.log('           "--virtual-store-dir=' + virtualStore + '"')
+  // 命令里带空格的路径都要加引号：用户名或安装目录带空格时，照抄原样会被 cmd 拆成两个参数
+  console.log('         ' + rendererInstallHint(profile))
+  if (desktopApp === undefined || desktopApp === '') {
+    console.log('')
+    console.log('   Both store flags are required: the pnpm bundled with dsh does not read the')
+    console.log("   profile's .npmrc, and leaving either one out fails with ERR_PNPM_UNEXPECTED_STORE.")
+  }
   console.log('')
-  console.log('   Both store flags are required: the pnpm bundled with dsh does not read the')
-  console.log("   profile's .npmrc, and leaving either one out fails with ERR_PNPM_UNEXPECTED_STORE.")
-  console.log('')
-  console.log('   Then restart DshDesktop — she shows up in the pet picker as 鲸鱼娘 (whalegirl-hd).')
+  console.log('   Then restart dsh — she shows up in the pet picker as 鲸鱼娘 (whalegirl-hd).')
 }

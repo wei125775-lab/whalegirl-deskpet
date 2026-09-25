@@ -16,7 +16,8 @@
  * 所以要重新跑一遍本脚本（或重跑 install.mjs）恢复。
  *
  * 用法：
- *   node patch-dshpet.mjs [--dry-run] [--profile=<name>]
+ *   node patch-dshpet.mjs [--dry-run] [--profile=<name>] [--dsh-home=<dir>]
+ * 给了 --profile 就只补那个 profile；两个都不给时才去扫 DSH_HOME 下的每个 profile。
  * 或作为模块：import { patchDshPet } from './patch-dshpet.mjs'
  */
 
@@ -31,14 +32,22 @@ export const WHALE_PHASES = ['whale-in', 'whale-loop', 'whale-out']
 const TARGETS = ['lib/index.js', 'lib/types/manifest-v2.js']
 const ANCHOR = 'PET_ACTIVITY_PHASES'
 
-/** 找到已安装的 dsh-pet 包根；找不到返回 undefined。 */
+/**
+ * 找到已安装的 dsh-pet 包根；找不到返回 undefined。
+ *
+ * 指定了 `profileDir` 就**只看那一个 profile**，不再兜底扫其他 profile —— 以前会，
+ * 于是「装到 A」可能变成「给 B 的 dsh-pet 打补丁」（A 里没有 dsh-pet 时静默改到 B）。
+ */
 export function findDshPet({ dshHome, profileDir } = {}) {
   const roots = []
-  if (profileDir !== undefined) roots.push(profileDir)
-  const home = dshHome ?? ((process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh'))
-  try {
-    for (const name of readdirSync(join(home, 'profiles'))) roots.push(join(home, 'profiles', name))
-  } catch { /* 没有 profiles 目录就算了 */ }
+  if (profileDir !== undefined) {
+    roots.push(profileDir)
+  } else {
+    const home = dshHome ?? ((process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh'))
+    try {
+      for (const name of readdirSync(join(home, 'profiles'))) roots.push(join(home, 'profiles', name))
+    } catch { /* 没有 profiles 目录就算了 */ }
+  }
   for (const root of roots) {
     const pkg = join(root, 'node_modules', '@linxin666', 'dsh-pet')
     if (existsSync(join(pkg, 'package.json'))) return pkg
@@ -122,7 +131,10 @@ if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.
   const argv = process.argv.slice(2)
   const dryRun = argv.includes('--dry-run')
   const profileArg = argv.find((a) => a.startsWith('--profile='))
-  const home = (process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
+  const homeArg = argv.find((a) => a.startsWith('--dsh-home='))
+  const home = homeArg !== undefined
+    ? homeArg.slice('--dsh-home='.length)
+    : ((process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh'))
   const result = patchDshPet({
     dshHome: home,
     profileDir: profileArg === undefined ? undefined : join(home, 'profiles', profileArg.slice('--profile='.length)),

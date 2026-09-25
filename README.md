@@ -89,11 +89,11 @@ docs/preview/   README 用的预览图
 
 **双击 `install.cmd`**（或 `node install.mjs`），它做三件事：
 
-1. 把包复制到 `<DSH_HOME>/profiles/web/node_modules/@wei125775-lab/whalegirl-deskpet/`
+1. 把包复制到 `<DSH_HOME>/profiles/<profile>/node_modules/@wei125775-lab/whalegirl-deskpet/`
 2. 在 profile 的 `package.json` 里加 `dependencies` 和 `dsh.profile.bundles` 条目
 3. 备份改之前的 manifest 到 `package.json.bak-whalegirl`
 
-然后**重启 DshDesktop**。插件本身不注册任何东西，只在启动时把包内的 `pet/` 释放到 `<DSH_HOME>/pets/whalegirl-hd/` —— dsh-pet 的 `frames2d` 宠物只能从那个目录扫出来（它内联 manifest 的通道只认 v1 sprite2d 精灵表，喂 frames2d 进去会静默降级，而 sprite2d 只有固定 9 个 Codex 动画名，装不下这些自定义动作）。
+然后**重启 dsh**（自建的 DshDesktop 或官方桌面版）。插件本身不注册任何东西，只在启动时把包内的 `pet/` 释放到 `<DSH_HOME>/pets/whalegirl-hd/` —— dsh-pet 的 `frames2d` 宠物只能从那个目录扫出来（它内联 manifest 的通道只认 v1 sprite2d 精灵表，喂 frames2d 进去会静默降级，而 sprite2d 只有固定 9 个 Codex 动画名，装不下这些自定义动作）。
 
 释放是幂等的：目标目录的内容和包内一致就跳过。比的是**内容**不是版本号——改了 `pet/` 里的任何东西（素材、`pet.json`、`voice.json`）都不用手动删目录，下次启动发现对不上就会重建；部署目录被拷坏（缺帧、拷到一半）也是同样处理，会自己修好。想强制覆盖就删掉 `<DSH_HOME>/pets/whalegirl-hd/` 再重启。**宠物没出现就再重启一次**——插件释放和 dsh-pet 扫目录都发生在启动期间，安装脚本已经把 bundle 排在 `@linxin666/dsh-pet` 前面，但万一顺序还是反了，第二次必然正确。
 
@@ -101,13 +101,40 @@ docs/preview/   README 用的预览图
 
 ## 给对方装
 
-整个文件夹拷过去（zip / 网盘 / clone 都行），对方双击 `install.cmd` 或跑 `node install.mjs`，重启 DshDesktop。对方那边需要：
+整个文件夹拷过去（zip / 网盘 / clone 都行），对方双击 `install.cmd` 或跑 `node install.mjs`，重启 dsh。对方那边需要：
 
 - **dsh** ≥ 0.1.5-rc.1（插件走 `dsh.bundle.patch` 机制）
 - **[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)** —— 没装的话宠物会照常释放到目录里，但没有任何东西渲染它；脚本会警告一句。先 `dsh plugin add @linxin666/dsh-pet`
 - **node**（dsh 本身就依赖它）
 
-安装脚本自己会找地方：`DSH_HOME` 环境变量优先，否则 `~/.dsh`；profile 优先挑装了 `dsh-pet` 的那个，找不到退回 `web`。多个 profile 或想指定用 `--profile=<名字>`。
+安装脚本自己会找地方：`--dsh-home=<目录>` > `DSH_HOME` 环境变量 > `~/.dsh`。profile 优先挑装了 `dsh-pet` 的那个，找不到退回 `web`；**有多个装了 `dsh-pet` 的 profile 时它不会猜**，会报出来让你用 `--profile=<名字>` 指定（挑错的代价是改了另一个 profile 的 bundles）。
+
+**渲染器版本必须跟着目标 profile 的 dsh 走**，所以 `--renderer-spec=` 是刚需：
+
+| 目标 | dsh | 渲染器 spec |
+|---|---|---|
+| 自建 DshDesktop / `dsh web` | 0.1.5-rc.x | `@linxin666/dsh-pet@0.3.23` |
+| 官方桌面版 | 0.1.7-rc.x | `@linxin666/dsh-pet@0.4.2` |
+
+dsh-pet 0.4.2 的 peerDeps 是 `dsh >=0.1.7-rc.1`，装上 0.1.5 的 profile 会直接坏掉；不传 `--renderer-spec` 时脚本按不带版本号装（= 装最新），**只适合全新环境**。
+
+## 官方桌面版（Electron 那版）
+
+桌面版有自己的数据目录（`DSH_HOME`）和自己的 profile，叫 `desktop`。装法与 web 一致，只是多一个 `--desktop-app`，让渲染器走**桌面版自带的 pnpm** 装（官方侧边栏「插件」页用的就是这条命令；不这么走只能退回 npm 全局的 `dsh` CLI，那是另一套版本）：
+
+```bash
+node install.mjs --profile=desktop --dsh-home=D:\dsh-desktop-home \
+  --desktop-app=D:\DeepSeekHarness --renderer-spec=@linxin666/dsh-pet@0.4.2
+```
+
+如果桌面版跑在**独立**的 `DSH_HOME` 下（推荐，官方桌面版和自建 DshDesktop 互不干扰），启动时要带上同一个变量：
+
+```bat
+set "DSH_HOME=D:\dsh-desktop-home"
+start "" "D:\DeepSeekHarness\DeepSeek Harness.exe"
+```
+
+注意安装器给桌面版建的快捷方式指向 exe 本体、**不带 `DSH_HOME`**，双击它会用默认的 `~/.dsh` —— 指向启动脚本才走隔离目录。桌面版升到新的 dsh 主版本后，渲染器也要跟着换对应的 dsh-pet 版本。
 
 ## 她的台词（`pet/voice.json`）
 
