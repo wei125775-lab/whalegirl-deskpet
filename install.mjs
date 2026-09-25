@@ -405,6 +405,17 @@ if (hasRenderer) {
   console.log('Done. Restart dsh to load the pet (pet v' + petVersion + ').')
   console.log('The pet shows up as 鲸鱼娘 (id: whalegirl-hd) in the pet picker.')
   console.log('If it does not appear, restart once more — the pet directory is scanned during startup.')
+} else if (skipRenderer) {
+  // 显式说了不要渲染器 = 目标 profile 走自研引擎（没装 dsh-pet）。这时候"没有渲染器"
+  // 是**正常状态**，不能再提示去装 dsh-pet —— 那会把用户推到一个两只宠物同时渲染的
+  // 局面上（自研引擎画一只，dsh-pet 再画一只）。
+  console.log('Done. Restart dsh to load the pet (pet v' + petVersion + '，自研引擎模式)。')
+  console.log('')
+  console.log('   没有渲染器是你要的：这个 profile 走 lib/engine/ 那套自研引擎，不依赖')
+  console.log('   @linxin666/dsh-pet。启动日志里会打一行「引擎：native」可以对照。')
+  console.log('')
+  console.log('   如果这个 profile 其实装了 dsh-pet，就别用 --no-renderer —— 入口探到它')
+  console.log('   会自己改走 legacy（释放素材 + 打相位补丁），两条路只走一条。')
 } else {
   // 收尾必须是"还差一步"，不能是乐观的 Done —— 否则人家装完重启、什么都没看到，只会以为这包是坏的。
   console.log('!! She will NOT show up yet — this profile has no renderer.')

@@ -120,23 +120,53 @@ dsh-pet 0.4.2 的 peerDeps 是 `dsh >=0.1.7-rc.1`，装上 0.1.5 的 profile 会
 
 ## 官方桌面版（Electron 那版）
 
-桌面版有自己的数据目录（`DSH_HOME`）和自己的 profile，叫 `desktop`。装法与 web 一致，只是多一个 `--desktop-app`，让渲染器走**桌面版自带的 pnpm** 装（官方侧边栏「插件」页用的就是这条命令；不这么走只能退回 npm 全局的 `dsh` CLI，那是另一套版本）：
+桌面版有自己的数据目录（`DSH_HOME`）和自己的 profile，叫 `desktop`。**它走自研引擎**：这个 profile 里不装 `@linxin666/dsh-pet`，`lib/engine/` 直接从包目录读素材、自己投影相位、自己画。所以安装只要一句：
 
 ```bash
-node install.mjs --profile=desktop --dsh-home=D:\dsh-desktop-home \
-  --desktop-app=D:\DeepSeekHarness --renderer-spec=@linxin666/dsh-pet@0.4.2
+node install.mjs --profile=desktop --dsh-home=D:\dsh-desktop-home --no-renderer
 ```
 
-如果桌面版跑在**独立**的 `DSH_HOME` 下（推荐，官方桌面版和自建 DshDesktop 互不干扰），启动时要带上同一个变量：
+`--no-renderer` 就是这个意思 —— **这个 profile 不需要 dsh-pet**，脚本也不会再去提示你装它（装了两只同时画在屏幕上）。
+
+启动：
 
 ```bat
 set "DSH_HOME=D:\dsh-desktop-home"
 start "" "D:\DeepSeekHarness\DeepSeek Harness.exe"
 ```
 
-注意安装器给桌面版建的快捷方式指向 exe 本体、**不带 `DSH_HOME`**，双击它会用默认的 `~/.dsh` —— 指向启动脚本才走隔离目录。桌面版升到新的 dsh 主版本后，渲染器也要跟着换对应的 dsh-pet 版本。
+注意安装器给桌面版建的快捷方式指向 exe 本体、**不带 `DSH_HOME`**，双击它会用默认的 `~/.dsh` —— 指向启动脚本才走隔离目录。
+
+### 两条路径：入口自己判定，不用配
+
+| | legacy | native |
+|---|---|---|
+| 什么时候走 | profile 里**有** dsh-pet | profile 里**没有** dsh-pet |
+| 素材 | 「释放」到 `$DSH_HOME/pets/` | 直接从包目录读 |
+| 相位 | 改 dsh-pet 的白名单 | 自己定义，不碰第三方 |
+| 看鲸鱼 | 包一层它的 `applyActivity` | 自己的管线，天然不被打断 |
+| 需要 dsh-pet | 是 | 否 |
+
+启动日志会打一行 `引擎：legacy` 或 `引擎：native`，**不静默切换**。想强制可以给插件行加 `config: { engine: 'native' }`，但装了 dsh-pet 又强走 native 会被拒绝并回退（两个引擎会同时画两只宠物）。
+
+### 排查「宠物没出现」
+
+引擎自带一个诊断接口，先看它再猜：
+
+```bash
+curl http://127.0.0.1:19387/api/whalegirl/diagnostics
+# {"hits":{"beacon":1,"pet":1,"state":182,"frame":24,"touch":0,"config":0},...}
+```
+
+- `beacon: 0` → 浏览器半端**压根没进页面**（`dsh.client` 没被扫到，或 `exports['./client']` 解析不出来）
+- `beacon` 有、`pet: 0` → 进来了但挂载失败
+- 三个都在涨、`frame` 也涨 → 引擎是好的，问题在显示层（被别的窗口盖住、或位置在视口外）
+
+这个接口是上一次排查"她怎么不出现"留下的：当时从外面看只有"右下角空的"一种症状，而它背后可能是完全不同的三种毛病。
 
 ## 她的台词（`pet/voice.json`）
+
+> ⚠️ **native 引擎（官方桌面版）这一批还没接台词** —— 气泡和 `voice.json` 都还没做，她在那边的动作、点击、看鲸鱼都有，就是不说话。下面这套目前只在 legacy 下生效。
 
 dsh-pet 把会话事件投影成 phase，**同时也会投影出一句台词**冒在气泡里。台词默认来自官方内置文案（"准备开始""正在思考""爬取中"…）—— 那不是鲸鱼娘在说话。所以她在 dsh 里的话由 `pet/voice.json` 提供。
 

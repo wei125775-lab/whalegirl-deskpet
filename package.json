@@ -1,11 +1,12 @@
 {
   "name": "@wei125775-lab/whalegirl-deskpet",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "鲸鱼娘桌宠 for dsh —— frames2d 宠物：待机是分层烘焙的呼吸+飘发+眨眼，动作由 AI 视频转序列帧",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -20,6 +21,9 @@
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "keywords": [
