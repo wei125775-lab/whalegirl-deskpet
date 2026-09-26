@@ -91,7 +91,7 @@ export function insertPhaseNames(text, names) {
 export function patchDshPet({ dshHome, profileDir, dryRun = false, log = console.log, warn = console.warn } = {}) {
   const pkg = findDshPet({ dshHome, profileDir })
   if (pkg === undefined) {
-    warn('[patch-dshpet] 找不到 @linxin666/dsh-pet，跳过（没装渲染器时宠物本来也显示不出来）')
+    warn('[patch-dshpet] 找不到 @linxin666/dsh-pet，跳过（这个 profile 会走自研引擎，不需要它）')
     return { ok: false, changed: [], already: [], missing: TARGETS }
   }
   const changed = []

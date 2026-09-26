@@ -16,7 +16,7 @@
  * Options:  --profile=<name>       pick a profile other than the auto-detected one
  *           --dsh-home=<dir>       harness home (default: $DSH_HOME, else ~/.dsh)
  *           --renderer-spec=<spec> what to install as the renderer, version included
- *                                  (default: @linxin666/dsh-pet@latest)
+ *                                  (no default except for the web profile; see below)
  *           --desktop-app=<dir>    official desktop app dir; install the renderer
  *                                  with the pnpm bundled in it
  *           --no-renderer          never auto-install the renderer
@@ -46,15 +46,19 @@ const skipRenderer = flag('no-renderer') !== undefined
 const wantProfile = flag('profile')
 const desktopApp = flag('desktop-app')
 /**
- * 要装的渲染器 spec（可以带版本）。默认不带版本。
+ * 渲染器 spec 的**按 profile 默认值**。没列进来的 profile 不给默认值 ——
+ * 宁可不装，也不猜。
  *
- * **给 web profile 装时必须钉版本**：桌面版用的是 dsh 0.1.7，要 dsh-pet 0.4.2
- * （它的 peerDeps 是 `dsh >=0.1.7-rc.1`），而 npm 全局的 dsh 是 0.1.5 —— 不钉版本
- * 就会把 0.4.2 装进 0.1.5 的 profile 里，web 侧直接坏掉。所以：
- *   web     -> --renderer-spec=@linxin666/dsh-pet@0.3.23
- *   desktop -> --renderer-spec=@linxin666/dsh-pet@0.4.2
+ * 为什么要钉版本：桌面版用的是 dsh 0.1.7，要 dsh-pet 0.4.2（peerDeps 是
+ * `dsh >=0.1.7-rc.1`）；而 npm 全局的 dsh 是 0.1.5，只吃 0.3.x。**不钉版本就会把
+ * 0.4.2 装进 0.1.5 的 profile 里，web 侧直接坏掉** —— pnpm 不会因为 peerDeps 不满足
+ * 就拒绝，照装不误。原来默认是"不带版本"（= latest），而 `resolveProfile()` 在没人装
+ * dsh-pet 时会退回 web，正好是文档让人跑的那条路：默认值把自己写明的禁忌踩了。
+ *   web     -> 0.3.23（npm 全局 dsh 0.1.5-rc.x）
+ *   桌面版  -> 0.4.2（要显式传；桌面版更该用 --no-renderer 走自研引擎）
  */
-const rendererSpec = flag('renderer-spec') || REQUIRED
+const RENDERER_SPEC_BY_PROFILE = { web: '@linxin666/dsh-pet@0.3.23' }
+const explicitRendererSpec = flag('renderer-spec')
 
 const dshHome = flag('dsh-home') || (process.env.DSH_HOME ?? '').trim() || join(homedir(), '.dsh')
 
@@ -181,6 +185,15 @@ function installRendererViaDesktopApp(profile, appDir) {
  * 按收尾那段手动装即可。返回是否装成。
  */
 function installRenderer(profile) {
+  if (rendererSpec === undefined) {
+    // 不猜版本。把两个安全值摆出来让人自己挑 —— 装错版本比不装更难查：
+    // 症状是 dsh 起不来 / 宠物没了，而跟"我刚装了个渲染器"很难联想到一起。
+    console.log('   这个 profile（' + profile.name + '）没有安全的默认渲染器版本，也没有传 --renderer-spec，不猜。')
+    console.log('   按目标 dsh 的版本钉一个（README 那张表）：')
+    console.log('     dsh 0.1.5-rc.x → --renderer-spec=@linxin666/dsh-pet@0.3.23')
+    console.log('     dsh 0.1.7-rc.x → --renderer-spec=@linxin666/dsh-pet@0.4.2（桌面版更该用 --no-renderer 走自研引擎）')
+    return false
+  }
   if (desktopApp !== undefined && desktopApp !== '') {
     return installRendererViaDesktopApp(profile, desktopApp)
   }
@@ -222,6 +235,10 @@ function installRenderer(profile) {
  * 返回的命令可能带换行。
  */
 function rendererInstallHint(profile) {
+  // 没定下 spec 时（见 RENDERER_SPEC_BY_PROFILE 那段）给个占位，别印出 undefined。
+  if (rendererSpec === undefined) {
+    return '<按目标 dsh 的版本钉一个，见 README 那张表：web 用 @linxin666/dsh-pet@0.3.23>'
+  }
   if (desktopApp !== undefined && desktopApp !== '') {
     return join(desktopApp, 'DeepSeek Harness.exe') + ' --expose-internals \\\n' +
       '           "' + join(desktopApp, 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.mjs') + '" add ' + rendererSpec +
@@ -247,6 +264,14 @@ function rendererDeclaresBundle(profile) {
 }
 
 const profile = resolveProfile()
+
+/**
+ * 要装的渲染器 spec。显式传的优先，其次按 profile 查默认值，**查不到就是 undefined
+ * —— 宁可停下来告诉人怎么办，也不装一个可能把环境装坏的版本**（见上面那段注释）。
+ */
+const rendererSpec = explicitRendererSpec !== undefined && explicitRendererSpec !== ''
+  ? explicitRendererSpec
+  : RENDERER_SPEC_BY_PROFILE[profile.name]
 const profileJson = join(profile.dir, 'package.json')
 const installedAt = join(profile.dir, 'node_modules', ...PKG_NAME.split('/'))
 
@@ -414,37 +439,28 @@ if (hasRenderer) {
   console.log('Done. Restart dsh to load the pet (pet v' + petVersion + ').')
   console.log('The pet shows up as 鲸鱼娘 (id: whalegirl-hd) in the pet picker.')
   console.log('If it does not appear, restart once more — the pet directory is scanned during startup.')
-} else if (skipRenderer) {
-  // 显式说了不要渲染器 = 目标 profile 走自研引擎（没装 dsh-pet）。这时候"没有渲染器"
-  // 是**正常状态**，不能再提示去装 dsh-pet —— 那会把用户推到一个两只宠物同时渲染的
-  // 局面上（自研引擎画一只，dsh-pet 再画一只）。
+} else {
+  // 没有渲染器 ≠ 她不会出现：入口探到 profile 里没有 dsh-pet 就会走自研引擎
+  // （lib/engine/）—— 素材直接从包目录读、相位自己投影，不需要任何第三方。
+  // 所以这里是"另一条路"，不是"还差一步"。（"我们只负责放素材，得有东西渲染它"
+  // 那套说法是自研引擎之前的事，早就不成立了。）
+  // 也不能反过来劝人去装 dsh-pet：那会变成两只同时画在屏幕上（自研引擎一只 +
+  // dsh-pet 一只）。真想要 legacy 的路子写在下面。
   console.log('Done. Restart dsh to load the pet (pet v' + petVersion + '，自研引擎模式)。')
   console.log('')
-  console.log('   没有渲染器是你要的：这个 profile 走 lib/engine/ 那套自研引擎，不依赖')
-  console.log('   @linxin666/dsh-pet。启动日志里会打一行「引擎：native」可以对照。')
+  console.log('   这个 profile 没装 ' + REQUIRED + '，所以走 lib/engine/ 那套自研引擎：')
+  console.log('   素材直接从包目录读、相位自己投影，不需要渲染器。启动日志里会打一行')
+  console.log('   「引擎：native」可以对照。')
   console.log('')
-  console.log('   如果这个 profile 其实装了 dsh-pet，就别用 --no-renderer —— 入口探到它')
-  console.log('   会自己改走 legacy（释放素材 + 打相位补丁），两条路只走一条。')
-} else {
-  // 收尾必须是"还差一步"，不能是乐观的 Done —— 否则人家装完重启、什么都没看到，只会以为这包是坏的。
-  console.log('!! She will NOT show up yet — this profile has no renderer.')
-  console.log('')
-  console.log('   ' + REQUIRED + ' is the plugin that actually draws her. Our package only')
-  console.log('   puts the assets in place, so nothing renders them until it is installed.')
-  console.log('')
-  console.log('   The good news: the assets are already there. Install the renderer and she')
-  console.log('   appears on the next restart — no need to run this script again.')
-  console.log('')
-  console.log('   Either way works:')
-  console.log('     - In the dsh UI: open the plugin market and search for "dsh-pet".')
-  console.log('     - Or from a terminal:')
-  // 命令里带空格的路径都要加引号：用户名或安装目录带空格时，照抄原样会被 cmd 拆成两个参数
-  console.log('         ' + rendererInstallHint(profile))
-  if (desktopApp === undefined || desktopApp === '') {
-    console.log('')
-    console.log('   Both store flags are required: the pnpm bundled with dsh does not read the')
-    console.log("   profile's .npmrc, and leaving either one out fails with ERR_PNPM_UNEXPECTED_STORE.")
+  if (skipRenderer) {
+    console.log('   如果这个 profile 其实装了 dsh-pet，就别用 --no-renderer —— 入口探到它')
+    console.log('   会自己改走 legacy（释放素材 + 打相位补丁），两条路只走一条。')
+  } else {
+    console.log('   想要 legacy 那条路（挂在 dsh-pet 上，有气泡和台词包）：先把它装上再重跑。')
+    console.log('     ' + rendererInstallHint(profile))
+    if (desktopApp === undefined || desktopApp === '') {
+      console.log('     （两个 store 参数是必须的：dsh 内置的 pnpm 不读 profile 的 .npmrc，')
+      console.log('       少任一个都会以 ERR_PNPM_UNEXPECTED_STORE 退出。）')
+    }
   }
-  console.log('')
-  console.log('   Then restart dsh — she shows up in the pet picker as 鲸鱼娘 (whalegirl-hd).')
 }
