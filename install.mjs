@@ -321,7 +321,9 @@ if (dryRun) {
   console.log('')
   console.log('[dry-run] would copy   ' + here + '  ->  ' + installedAt)
   console.log('[dry-run] would register ' + PKG_NAME + ' in dependencies + bundles (pet v' + petVersion + ')')
-  console.log('[dry-run] would patch @linxin666/dsh-pet phases with ' + 'whale-in / whale-loop / whale-out')
+  if (hasRenderer) {
+    console.log('[dry-run] would patch @linxin666/dsh-pet phases with ' + 'whale-in / whale-loop / whale-out')
+  }
   if (!hasRenderer && !skipRenderer) {
     console.log('[dry-run] would install the renderer:  ' + rendererInstallHint(profile))
   }
@@ -425,13 +427,17 @@ console.log('registered : ' + PKG_NAME + ' at index ' + bundles.indexOf(PKG_NAME
 console.log('backup     : ' + profileJson + '.bak-whalegirl')
 
 // 4. dsh-pet 的相位白名单补丁 —— 「看鲸鱼」用的三个自定义 phase 靠它放行。
+// 只在真的装了 dsh-pet（legacy 渲染层）时才有意义：走自研引擎的 profile 里没这个包，
+// 打补丁只会抛错再被 catch 成一条噪音 note，所以先用 hasRenderer 挡掉。
 // 失败只警告不中断：补丁不在时宠物照样装、照样显示，只是没有看鲸鱼
 // （插件里的护栏会把那几个相位从 manifest 摘掉，不会让她被校验拒绝）。
-try {
-  const { patchDshPet } = await import('./patch-dshpet.mjs')
-  patchDshPet({ dshHome, profileDir: profile.dir })
-} catch (error) {
-  console.log('note       : dsh-pet phase patch skipped (' + (error && error.message ? error.message : error) + ')')
+if (hasRenderer) {
+  try {
+    const { patchDshPet } = await import('./patch-dshpet.mjs')
+    patchDshPet({ dshHome, profileDir: profile.dir })
+  } catch (error) {
+    console.log('note       : dsh-pet phase patch skipped (' + (error && error.message ? error.message : error) + ')')
+  }
 }
 
 console.log('')
