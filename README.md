@@ -48,6 +48,8 @@
 | **Claude Code 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 桌宠，跟 Claude Code 联动的那只 | `node claude/install.mjs` → 按它打印的收尾。详见 [`claude/README.md`](claude/README.md) |
 | **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | 双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh。渲染器没装的话**脚本会自己检测并装上** |
 
+> dsh 版也有打好的 zip：[`dsh-v1.8.0`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.8.0)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是 **Windows 绿色版**（Claude Code 那只），dsh 版得从 tag 进。
+
 > 说明：dsh 版的渲染器是**另一个插件**（[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)），本包只管把素材放好、把她画出来的是它。安装脚本会先看它有没有、没有就调 `dsh plugin add` 装上（顺带把 bundle 登记好、并给它的相位白名单打上看鲸鱼要用的补丁）——**不想让它动你的插件环境就加 `--no-renderer`**。
 >
 > 自动装失败也不会坏：素材已经就位，脚本会在收尾给出可直接复制的命令，装完重启即可、**不用重跑本脚本**。装渲染器之前界面上什么都不会出现，这是分工决定的，不是坏了。
