@@ -271,6 +271,10 @@ try {
 let hasRenderer = existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
 if (hasRenderer) {
   console.log('renderer   : ' + REQUIRED + ' found')
+} else if (skipRenderer) {
+  // 显式 --no-renderer 时"没有渲染器"是**正常状态**：这个 profile 走自研引擎。
+  // 以前这里照样打 NOT INSTALLED + "she will not show up yet"，跟收尾那段自相矛盾。
+  console.log('renderer   : none (--no-renderer → lib/engine/ 自研引擎，正常)')
 } else {
   console.log('renderer   : ' + REQUIRED + ' ** NOT INSTALLED ** — she will not show up yet (see the end)')
 }
@@ -322,11 +326,16 @@ rmSync(trash, { recursive: true, force: true })
 // node_modules had its own root rejected -- and when cpSync rejects the root it says
 // nothing, creates nothing and copies nothing, while the script carries on and prints
 // "copied" as if it had worked.
+// 只拷运行时真正要用的东西。`claude/`（145MB，里面是 petpack 和 PetPet 那侧的安装器）
+// 和 `docs/`（9.8MB 截图）对 dsh 侧的插件毫无用处 —— 以前一起拷进去，每份副本 226MB，
+// 而实际用到的 pet/ + lib/ 只有 71MB；换 staged rename 时峰值还要再叠一份。
+// 这两个目录的正当去处是发行包和仓库，不是 profile 的 node_modules。
+const NOT_NEEDED = new Set(['node_modules', '.git', 'claude', 'docs'])
 cpSync(here, stage, {
   recursive: true,
   filter: (src) => {
     const parts = relative(here, src).split(sep)
-    return !parts.includes('node_modules') && !parts.includes('.git')
+    return !parts.some((part) => NOT_NEEDED.has(part))
   },
 })
 

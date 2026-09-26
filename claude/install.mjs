@@ -296,7 +296,10 @@ function installHooks() {
     const list = hooks[event] ?? (hooks[event] = [])
     const cmds = (Array.isArray(list) ? list : []).flatMap((g) =>
       (g && Array.isArray(g.hooks) ? g.hooks : []).map((h) => norm(h && h.command)))
-    if (cmds.includes(norm(command)) && !FORCE) continue
+    // 判重**永远**生效。原来这里跟着 `--force` 一起失效（`&& !FORCE`），于是加 --force
+    // 重跑时每个事件都会多挂一条——同一件事执行两遍（state.json / 子代理记号各写两次）。
+    // --force 的正当用途只有一个：强制重装素材（见 installPet），不该管钩子。
+    if (cmds.includes(norm(command))) continue
     list.push({ hooks: [{ type: 'command', command }] })
     added += 1
   }
@@ -564,7 +567,9 @@ async function main() {
         say('   绿色版用户加 --hooks-only 可以完全跳过这一步。')
         process.exit(1)
       } else if (alreadyPatched(root)) {
-        ok('看起来已经打过补丁了（函数名对得上），跳过。要强制重打加 --force')
+        ok('看起来已经打过补丁了（函数名对得上），跳过')
+        say('   --force 只管素材，不会重打补丁（以前那句提示是空头支票）。真怀疑补丁是旧的或打了一半：')
+        say('   把 viewer 恢复成干净的上游再来跑；在已打过的文件上重打会明确报"上下文对不上"并停下，不会打成半截。')
       } else if (DRY) {
         say('   [dry-run] 打补丁 ' + PATCH + ' → ' + root)
       } else {
