@@ -1,0 +1,5 @@
+{
+  "$phases": { "done": "putaway" },
+  "putaway": { "touchface": 55, "bless": 10, "idle": 35 },
+  "bless": { "idle": 100 }
+}
