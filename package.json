@@ -13,7 +13,10 @@
     "lib",
     "pet",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "install.mjs",
+    "install.cmd",
+    "patch-dshpet.mjs"
   ],
   "dsh": {
     "engines": {
