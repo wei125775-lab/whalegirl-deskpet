@@ -192,11 +192,11 @@ curl http://127.0.0.1:19387/api/whalegirl/diagnostics
 
 ## 她的台词（`pet/voice.json`）
 
-> ⚠️ **native 引擎（官方桌面版）这一批还没接台词** —— 气泡和 `voice.json` 都还没做，她在那边的动作、点击、看鲸鱼都有，就是不说话。下面这套目前只在 legacy 下生效。
+> ✅ **两条路都接了台词**（2026-09-27）。native 引擎（官方桌面版）在 `lib/engine/voice.js` 里复刻了同一套 voice-pack 语义 —— 11 个状态场景、17 个工具类别、并行工具计数、碎碎念，气泡视觉照 dsh-pet 的规格做，行为也一致（干活期间常驻、干完/失败满 2.4 秒才收）。所以下面这套文案**两条路共用同一个 `voice.json`**，改一处两边都变。
 
 dsh-pet 把会话事件投影成 phase，**同时也会投影出一句台词**冒在气泡里。台词默认来自官方内置文案（"准备开始""正在思考""爬取中"…）—— 那不是鲸鱼娘在说话。所以她在 dsh 里的话由 `pet/voice.json` 提供。
 
-**`voice` 不能写进 `pet.json`** —— manifest v2 的顶层白名单里没有这个字段。它是一个**跟 `pet.json` 平级的独立文件**，放在宠物目录里就会被读走（`scanPetDir` 里 `loadVoicePackFile(join(entryDir, "voice.json"))`）。宠物被释放到 `~/.dsh/pets/<id>/` 时会一起带过去。
+**`voice` 不能写进 `pet.json`** —— manifest v2 的顶层白名单里没有这个字段。它是一个**跟 `pet.json` 平级的独立文件**，放在宠物目录里就会被读走（`scanPetDir` 里 `loadVoicePackFile(join(entryDir, "voice.json"))`）。宠物被释放到 `~/.dsh/pets/<id>/` 时会一起带过去。**native 引擎不经过释放目录**，直接从包内的 `pet/` 读（`loadVoice(definition.petDir)`）—— 改完台词文件记得同步 profile 里那份副本。
 
 能配四块：
 
