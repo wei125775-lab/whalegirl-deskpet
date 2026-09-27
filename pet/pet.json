@@ -201,7 +201,7 @@
           "f27.png",
           "f28.png"
         ],
-        "loop": false
+        "loop": true
       },
       "eat-mid": {
         "frames": [
