@@ -48,7 +48,7 @@
 | **Claude Code 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 桌宠，跟 Claude Code 联动的那只 | `node claude/install.mjs` → 按它打印的收尾。详见 [`claude/README.md`](claude/README.md) |
 | **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | 双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh。渲染器没装的话**脚本会自己检测并装上** |
 
-> dsh 版也有打好的 zip：[`dsh-v1.9.0`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.0)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是 **Windows 绿色版**（Claude Code 那只），dsh 版得从 tag 进。
+> dsh 版也有打好的 zip：[`dsh-v1.9.1`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.1)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是 **Windows 绿色版**（Claude Code 那只），dsh 版得从 tag 进。
 
 > 说明：dsh 版的渲染器是**另一个插件**（[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)），本包只管把素材放好、把她画出来的是它。安装脚本会先看它有没有、没有就调 `dsh plugin add` 装上（顺带把 bundle 登记好、并给它的相位白名单打上看鲸鱼要用的补丁）——**不想让它动你的插件环境就加 `--no-renderer`**。
 >
@@ -106,7 +106,7 @@ docs/preview/   README 用的预览图
 整个文件夹拷过去（zip / 网盘 / clone 都行），对方双击 `install.cmd` 或跑 `node install.mjs`，重启 dsh。对方那边需要：
 
 - **dsh** ≥ 0.1.5-rc.1（插件走 `dsh.bundle.patch` 机制）
-- **[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)** —— 没装的话宠物会照常释放到目录里，但没有任何东西渲染它；脚本会警告一句。先 `dsh plugin add @linxin666/dsh-pet`
+- **[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)** —— **可选，两条路只走一条**。装了就走 legacy（挂在它上面渲染，有气泡和台词包）；没装就走自研引擎（`lib/engine/`，素材直接从包目录读、相位自己投影），**她照样会显示**。入口按实际探测结果定，不猜
 - **node**（dsh 本身就依赖它）
 
 安装脚本自己会找地方：`--dsh-home=<目录>` > `DSH_HOME` 环境变量 > `~/.dsh`。profile 优先挑装了 `dsh-pet` 的那个，找不到退回 `web`；**有多个装了 `dsh-pet` 的 profile 时它不会猜**，会报出来让你用 `--profile=<名字>` 指定（挑错的代价是改了另一个 profile 的 bundles）。
@@ -118,7 +118,7 @@ docs/preview/   README 用的预览图
 | 自建 DshDesktop / `dsh web` | 0.1.5-rc.x | `@linxin666/dsh-pet@0.3.23` |
 | 官方桌面版 | 0.1.7-rc.x | `@linxin666/dsh-pet@0.4.2` |
 
-dsh-pet 0.4.2 的 peerDeps 是 `dsh >=0.1.7-rc.1`，装上 0.1.5 的 profile 会直接坏掉；不传 `--renderer-spec` 时脚本按不带版本号装（= 装最新），**只适合全新环境**。
+dsh-pet 0.4.2 的 peerDeps 是 `dsh >=0.1.7-rc.1`，装上 0.1.5 的 profile 会直接坏掉。所以脚本**不猜**：`web` profile 有钉好的默认值（0.3.23），其它 profile 查不到默认值时它会停下来，让你显式传 `--renderer-spec=`（或加 `--no-renderer` 走自研引擎）—— 宁可停下，也不装一个可能把环境装坏的版本。
 
 ## 官方桌面版（Electron 那版）
 
