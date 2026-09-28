@@ -217,7 +217,15 @@ function installRenderer(profile) {
   const argv = shell ? args.map(q) : args
   const shown = shell ? [q(cli), ...argv].join(' ') : [cli, ...args].join(' ')
   console.log('   ' + shown)
-  const r = spawnSync(shell ? q(cli) : cli, argv, { stdio: 'inherit', shell })
+  // `DSH_HOME` 必须显式传下去：`dsh plugin --profile X add` 定位 profile 只能靠这个环境
+  // 变量或 cwd，两个都不传时会落到**默认的 ~/.dsh** —— 于是你传了 `--dsh-home=` 指向别处
+  // 时，渲染器被装进了另一个 home 的同名 profile（静默改动了别人的环境，版本还可能被
+  // 无声升降），而这里只会报一句 "auto-install did not succeed"，看不出是为什么。
+  const r = spawnSync(shell ? q(cli) : cli, argv, {
+    stdio: 'inherit',
+    shell,
+    env: { ...process.env, DSH_HOME: dshHome },
+  })
   if (r.error !== undefined) {
     console.log('   启动失败：' + r.error.message)
     return false
@@ -245,7 +253,10 @@ function rendererInstallHint(profile) {
       '\n         （先设 ELECTRON_RUN_AS_NODE=1，cwd 用 ' + profile.dir + '）'
   }
   const { storeDir, virtualStoreDir } = storeDirs(profile.dir)
-  return 'dsh plugin --profile ' + profile.name + ' add ' + rendererSpec +
+  // 和上面 spawn 那条路一样：`dsh plugin --profile X add` 不设 `DSH_HOME` 会落到默认
+  // 的 ~/.dsh。手动照抄这条命令的人如果传过 `--dsh-home=`，得先把变量设回来。
+  return (dshHome === join(homedir(), '.dsh') ? '' : 'set DSH_HOME=' + dshHome + '\n           ') +
+    'dsh plugin --profile ' + profile.name + ' add ' + rendererSpec +
     (storeDir === undefined ? '' : '\n           "--store-dir=' + storeDir + '"') +
     '\n           "--virtual-store-dir=' + virtualStoreDir + '"'
 }
@@ -290,9 +301,10 @@ try {
   fail('pet/pet.json is not readable JSON: ' + error.message)
 }
 
-// 1. Warn (do not fail) when the pet renderer is absent: the files still land
-// in the right place, they just will not show up until dsh-pet is installed.
-// The closing message depends on this, so it is computed once here.
+// 1. Warn (do not fail) when the pet renderer is absent. The files still land in the
+// right place, and nothing here predicts what the user will see: the entry point falls
+// back to `lib/engine/` (native, 自研) when dsh-pet is missing, so the pet does show up.
+// The closing message depends on this flag, so it is computed once here.
 let hasRenderer = existsSync(join(profile.dir, 'node_modules', ...REQUIRED.split('/')))
 if (hasRenderer) {
   console.log('renderer   : ' + REQUIRED + ' found')
@@ -301,7 +313,11 @@ if (hasRenderer) {
   // 以前这里照样打 NOT INSTALLED + "she will not show up yet"，跟收尾那段自相矛盾。
   console.log('renderer   : none (--no-renderer → lib/engine/ 自研引擎，正常)')
 } else {
-  console.log('renderer   : ' + REQUIRED + ' ** NOT INSTALLED ** — she will not show up yet (see the end)')
+  // 措辞只陈述"没装"，**不预言后果** —— 入口探到没有渲染器就走 lib/engine/ 那套自研引擎，
+  // 她照样会显示（收尾那一段自己也这么说）。这里原来写的是 "she will not show up yet"，
+  // 跟同一次运行的收尾段直接矛盾，新用户会以为装失败了去反复重跑、甚至真把渲染器装上 ——
+  // 而桌面版的正确路径恰恰是**不要**装它（装了入口就改走 legacy）。
+  console.log('renderer   : ' + REQUIRED + ' ** NOT INSTALLED **（下一步会替你装；装不上也照样能跑，见文末）')
 }
 
 // 1.5 Refuse to run from the installed copy itself. install.cmd lives inside the plugin
@@ -358,13 +374,23 @@ rmSync(trash, { recursive: true, force: true })
 // 而实际用到的 pet/ + lib/ 只有 71MB；换 staged rename 时峰值还要再叠一份。
 // 这两个目录的正当去处是发行包和仓库，不是 profile 的 node_modules。
 const NOT_NEEDED = new Set(['node_modules', '.git', 'claude', 'docs'])
-cpSync(here, stage, {
-  recursive: true,
-  filter: (src) => {
-    const parts = relative(here, src).split(sep)
-    return !parts.some((part) => NOT_NEEDED.has(part))
-  },
-})
+try {
+  cpSync(here, stage, {
+    recursive: true,
+    filter: (src) => {
+      const parts = relative(here, src).split(sep)
+      return !parts.some((part) => NOT_NEEDED.has(part))
+    },
+  })
+} catch (error) {
+  // 这一段的失败以前是裸抛的：原始 EBUSY/ENOSPC 堆栈直接甩出来，而下面 rename 那步
+  // 写好的"旧副本原封未动"根本没机会打；同时那个带 pid 的暂存目录会以"半份拷贝"的
+  // 形式永久留在 node_modules 里（下次运行只清自己 pid 的那个名字）。
+  rmSync(stage, { recursive: true, force: true })
+  fail('拷贝到暂存目录失败：' + error.message + '\n' +
+    '已装的那份**没有被碰过**（还没走到替换那一步）。多半是杀软/资源管理器占着某个文件，' +
+    '或磁盘满了 —— 关掉再重跑。')
+}
 
 let hadOld = false
 try {
@@ -395,7 +421,16 @@ console.log('copied     : -> ' + installedAt)
 const raw = readFileSync(profileJson, 'utf8')
 const backupPath = profileJson + '.bak-whalegirl'
 if (!existsSync(backupPath)) writeFileSync(backupPath, raw)
-const profilePkg = JSON.parse(raw)
+let profilePkg
+try {
+  profilePkg = JSON.parse(raw)
+} catch (error) {
+  // 以前这里是裸 JSON.parse：文件带 BOM（用记事本改过就会有）时抛原始 SyntaxError 堆栈，
+  // 而那时插件**已经拷进去了**、只是没登记进 bundles —— 也就是她不会加载，人却看不出为什么。
+  fail(profileJson + ' 不是合法的 JSON：' + error.message + '\n' +
+    '文件多半是被编辑器加了个 BOM（存成不带 BOM 的 UTF-8 即可）。\n' +
+    '插件已经拷进去了，但**没有**登记进 bundles，所以现在不会被加载 —— 改完这个文件再重跑一次。')
+}
 
 profilePkg.dependencies ??= {}
 profilePkg.dependencies[PKG_NAME] = 'file:./node_modules/' + PKG_NAME

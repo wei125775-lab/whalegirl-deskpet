@@ -11,7 +11,7 @@
  *   - lib/types/manifest-v2.js     （导出的那份，`parsePetManifest` 走它）
  *
  * **dsh-pet 升级会把这个补丁冲掉。** 冲掉之后宠物插件里的护栏
- * （`stripWhalePhasesIfUnsupported`）会在 dsh-pet 读 manifest 之前把 whale-*
+ * （`lib/legacy.js` 的 `syncWhalePhases()`）会在 dsh-pet 读 manifest 之前把 whale-*
  * 相位摘掉，降级成"没有看鲸鱼"，不会让她整只消失 —— 但功能会静默关闭，
  * 所以要重新跑一遍本脚本（或重跑 install.mjs）恢复。
  *
@@ -21,7 +21,7 @@
  * 或作为模块：import { patchDshPet } from './patch-dshpet.mjs'
  */
 
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -126,8 +126,26 @@ export function patchDshPet({ dshHome, profileDir, dryRun = false, log = console
   return { ok: changed.length > 0 || already.length === TARGETS.length, changed, already, missing }
 }
 
+/**
+ * 这个文件是"被直接执行"还是"被 import"的？
+ *
+ * **不能拿路径字符串直接比**：Node 解析主模块时会把 `import.meta.url` 解析成真实路径，
+ * 而 `process.argv[1]` 保留你敲的那个路径 —— 两者经过 junction / 符号链接进来时就不相等，
+ * 于是脚本一句话不说、退出码 0、文件一个字没动（`jd`/软链目录下跑就会这样）。而 README
+ * 里"dsh-pet 升级后跑 `node patch-dshpet.mjs` 恢复"这条正是要人手动跑它。
+ * 所以两边都做 realpath 再比。（Node 24+ 可以用 `import.meta.main`，本包不要求那个版本。）
+ */
+function isDirectRun() {
+  if (process.argv[1] === undefined) return false
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
+
 // 直接执行时当命令行用
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (isDirectRun()) {
   const argv = process.argv.slice(2)
   const dryRun = argv.includes('--dry-run')
   const profileArg = argv.find((a) => a.startsWith('--profile='))
