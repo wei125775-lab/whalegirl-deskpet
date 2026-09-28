@@ -1,0 +1,16 @@
+{
+  "name": "whalegirl-deskpet",
+  "version": "1.0.0",
+  "description": "鲸鱼娘桌宠：你在 WorkBuddy 里干活时她端着碗吃饭，干完收碗，起子代理时脚边游出一只小海豚。A whale-girl desktop pet for WorkBuddy（需要本机已装 PetPet 桌宠本体）。",
+  "author": {
+    "name": "wei125775-lab"
+  },
+  "category": "fun",
+  "keywords": [
+    "desktop-pet",
+    "pet",
+    "whalegirl",
+    "桌宠"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

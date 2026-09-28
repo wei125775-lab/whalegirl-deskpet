@@ -47,6 +47,7 @@
 |---|---|---|
 | **Claude Code 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 桌宠，跟 Claude Code 联动的那只 | `node claude/install.mjs` → 按它打印的收尾。详见 [`claude/README.md`](claude/README.md) |
 | **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | 双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh。渲染器没装的话**脚本会自己检测并装上** |
+| **WorkBuddy 版** | [WorkBuddy](https://www.codebuddy.cn/work/) 里那只（**同样要先装绿色版**） | `node workbuddy/install.mjs` → 完全退出 WorkBuddy 再打开。详见 [`workbuddy/README.md`](workbuddy/README.md) |
 
 > dsh 版也有打好的 zip：[`dsh-v1.9.1`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.1)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是 **Windows 绿色版**（Claude Code 那只），dsh 版得从 tag 进。
 
@@ -74,12 +75,30 @@
 pet/            dsh 版素材 + manifest（frames2d 格式）
 lib/ · install.mjs · install.cmd      dsh 版插件：把 pet/ 释放给 dsh-pet
 claude/         Claude Code 版：宠物包（petpack）+ 一键安装 + viewer 补丁 + 钩子脚本
+workbuddy/      WorkBuddy 版：hook 插件（宠物本体仍是绿色版那只，这个只负责让她跟着你干活）
 docs/preview/   README 用的预览图
 ```
 
 两个版本用的是同一批动作素材，只是打包格式不同：Claude 版是**精灵表 + pet.json v3**（PetPet 框架），dsh 版是**逐帧 PNG + manifest v2**（`@linxin666/dsh-pet` 插件）。
 
 > ⚠️ **素材全部由 AI 生成** —— 立绘经 [see-through](https://github.com/ModelsLab/see-through) 分层，动作由豆包图生视频抽帧。拿去做别的事情之前，先确认所用平台的服务条款：不同平台对生成内容的商用和再分发规定不一样。代码部分是 MIT（见 [LICENSE](LICENSE)）。
+
+---
+
+# WorkBuddy 版
+
+[WorkBuddy](https://www.codebuddy.cn/work/)（腾讯那个桌面 AI 工作台）里也能用同一只桌宠。做法和 dsh 完全不同：
+
+**她不画在 WorkBuddy 窗口里** —— 她就是你桌面上的那只（绿色版 / Claude Code 那只）；WorkBuddy 这边只有一个 **hook 插件**，负责告诉她"我在干活"。所以两件事都要做：
+
+1. 先装绿色版，确认桌面上有她
+2. `node workbuddy/install.mjs` → **完全退出 WorkBuddy 再打开**
+
+装完的效果：你发消息她端碗吃饭、一轮回答结束收碗、派子代理时脚边游出一只小海豚。
+
+> WorkBuddy 的 hook 机制和 Claude Code 是**同一套** —— 事件名（`UserPromptSubmit` / `Stop` / `SessionStart` / `SubagentStart` …）、payload 字段、配置结构全都对得上，所以这一版**复用 `claude/` 下那三个脚本**，没有第二份实现。唯一要留意的是两边**共用 `~/.petpet/state.json`**：同时开着、一个在干活一个待机时她会闪一下，只用其中一边就没事。
+
+装、卸、排查都写在 [`workbuddy/README.md`](workbuddy/README.md) 里。
 
 ---
 

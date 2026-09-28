@@ -1,0 +1,23 @@
+{
+  "name": "whalegirl-local",
+  "description": "本地插件市场：鲸鱼娘桌宠（whalegirl-deskpet）",
+  "owner": {
+    "name": "wei125775-lab",
+    "url": "https://github.com/wei125775-lab/whalegirl-deskpet"
+  },
+  "plugins": [
+    {
+      "name": "whalegirl-deskpet",
+      "description": "鲸鱼娘桌宠：你在 WorkBuddy 里干活时她端着碗吃饭，干完收碗、偶尔托腮，起子代理时脚边游出一只小海豚。",
+      "description_en": "A whale-girl desktop pet for WorkBuddy: she eats while you work, puts the bowl away when done, and a little whale swims out when a subagent runs.",
+      "version": "1.0.0",
+      "source": "./plugins/whalegirl-deskpet",
+      "license": "MIT",
+      "keywords": [
+        "desktop-pet",
+        "pet",
+        "whalegirl"
+      ]
+    }
+  ]
+}
