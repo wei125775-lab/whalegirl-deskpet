@@ -28,7 +28,12 @@ node install.mjs
 
 它会装插件 + 写 hooks。**注意这个包本身不含宠物** —— 桌宠本体得先有（绿色版 zip 里那个），否则装完桌面上什么都不会多出来。
 
-脚本会：把插件拷到 `~/.workbuddy/plugins/marketplaces/whalegirl-local/`，然后在 WorkBuddy 的两份登记文件里各加一条（**改之前会备份**成 `*.bak-whalegirl`，而且重跑不会重复加）。
+脚本会做四件事，**改之前都会备份**成 `*.bak-whalegirl`（重跑不会重复加）：
+
+1. 把插件拷到 `~/.workbuddy/plugins/marketplaces/whalegirl-local/`
+2. 在市场登记文件（`known_marketplaces.json`）和已安装列表（`installed_plugins.json`）里各加一条
+3. **在 `settings.json` 的 `enabledPlugins` 里把它打开** —— 这一步不能省：**装了不等于启用**，不打开的话插件在列表里看得见、状态也正常，但它的 hooks 一条都不会执行，日志里也不会说为什么
+4. 再把同一份 hook 直接写进 `settings.json`（见下面的「为什么默认装两份」）
 
 3. **完全退出 WorkBuddy 再打开**（插件是启动时加载的）。
 
@@ -64,15 +69,17 @@ node install.mjs --dry-run
 
 ## 卸
 
-删掉这三处就干净了（都在 `~/.workbuddy/` 下）：
+删掉这四处就干净了（都在 `~/.workbuddy/` 下）：
 
 ```
-plugins/marketplaces/whalegirl-local/          整个目录
-plugins/known_marketplaces.json                去掉 "whalegirl-local" 那一项
-plugins/installed_plugins.json                 去掉 "whalegirl-deskpet@whalegirl-local" 那一项
+plugins/marketplaces/whalegirl-local/     整个目录
+plugins/known_marketplaces.json           去掉 "whalegirl-local" 那一项
+plugins/installed_plugins.json            去掉 "whalegirl-deskpet@whalegirl-local" 那一项
+settings.json                             去掉 enabledPlugins 里的 "whalegirl-deskpet@whalegirl-local"
+                                          以及（装过保底那份的话）整个 hooks 段
 ```
 
-两个 json 都有 `*.bak-whalegirl` 备份，直接换回来也行（但那样会丢掉你后来装的别的插件）。
+几个文件都有 `*.bak-whalegirl` 备份，直接换回来也行（但那样会丢掉你后来装的别的插件）。
 
 ## 几个说明
 

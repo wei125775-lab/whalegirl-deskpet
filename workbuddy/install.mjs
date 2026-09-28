@@ -12,13 +12,19 @@
  * 那份要用户手改 JSON，装和卸都得教一遍。
  *
  * **但默认两条都写**：插件里的 hooks 会不会被执行跟 WorkBuddy 的版本有关，而
- * "装完没反应"对普通人来说根本没法判断 —— 所以保底那条（直接写 settings.json）
+ * "装完没反应"对普通人来说根本没法判断 —— 所以保底那条（直接写 settings.json 的 hooks）
  * 是默认开的，两个都生效时同一个事件跑两遍（脚本是幂等的写，只多一次进程开销）。
  * 想要干净、只用插件机制就加 `--plugin-only`。
  *
+ * ⚠️ **不管哪条路，都必须在 settings.json 的 `enabledPlugins` 里把它打开** ——
+ * `installed_plugins.json` 只表示"装了"，真正决定插件生不生效的是那个开关，
+ * 而 hooks 是从 `getActivePlugins()` 取的。少了这一步，插件在列表里看得见、
+ * 状态也正常，但 hooks 一条都不会执行、日志里也不会说为什么。（实测：这台机器
+ * 装了 45 个插件，只有 7 个在 `enabledPlugins` 里。）
+ *
  * 用法：
- *   node install.mjs                     装插件 + 写 settings.json（保底，推荐）
- *   node install.mjs --plugin-only       只装插件，不碰 settings.json
+ *   node install.mjs                     装插件 + 启用 + 写 settings.json 的 hooks（推荐）
+ *   node install.mjs --plugin-only       装插件 + 启用，但不写保底那份 hooks
  *   node install.mjs --dry-run           只打印要做什么
  *   node install.mjs --workbuddy-home=<目录>   数据目录不是 ~/.workbuddy 时
  *
@@ -84,6 +90,7 @@ if (dryRun) {
   console.log('[dry-run] would copy   ' + srcMarket + '  ->  ' + marketDir)
   console.log('[dry-run] would register ' + MARKET + ' in known_marketplaces.json')
   console.log('[dry-run] would register ' + PKG + '@' + MARKET + ' in installed_plugins.json')
+  console.log('[dry-run] would enable it (settings.json: enabledPlugins)')
   if (withSettingsHooks) console.log('[dry-run] would also write hooks into settings.json')
   process.exit(0)
 }
@@ -138,10 +145,12 @@ for (const f of [knownJson, installedJson]) {
 
 const known = readJson(knownJson, 'known_marketplaces.json')
 const now = new Date().toISOString()
+// `type` 只能是 `zip` 或 `directory`（内置市场用的就是 directory）。写别的值它认不认
+// 没验过 —— 而这台机器上现成的样本就是 directory + 本地路径，照着写最稳。
 known[MARKET] = {
   manifestName: MARKET,
-  type: 'local',
-  source: { source: 'local', path: marketDir },
+  type: 'directory',
+  source: { source: 'directory', path: marketDir },
   installLocation: marketDir,
   description: '本地插件市场：鲸鱼娘桌宠',
   lastUpdated: now,
@@ -166,26 +175,39 @@ installed.plugins[key] = [{
 writeFileSync(installedJson, JSON.stringify(installed, null, 2) + '\n')
 console.log('registered : ' + key + ' v' + version)
 
-// 3. 保底那条路（默认开）：直接往 settings.json 写 hooks。
+// 3. **启用它** —— 这一步不能省，而且和下面那条保底路是两件事。
+//
+// `installed_plugins.json` 只表示"装了"；真正决定插件生不生效的是 settings.json 里的
+// `enabledPlugins`。新装的插件默认**不在**里面（实测：这台机器装了 45 个插件，只有 7 个
+// 是 true），而 hook 是从 `getActivePlugins()` 取的 —— 少了这一条，插件在列表里看得见、
+// 状态也没问题，但它的 hooks **一条都不会执行**，日志里也不会说为什么。
+// 所以即使 `--plugin-only`（不要保底那条），这一条也照写。
+const settingsPath = join(wbHome, 'settings.json')
+backup(settingsPath)
+const settingsCfg = existsSync(settingsPath) ? readJson(settingsPath, 'settings.json') : {}
+settingsCfg.enabledPlugins ??= {}
+if (settingsCfg.enabledPlugins[key] !== true) {
+  settingsCfg.enabledPlugins[key] = true
+  writeFileSync(settingsPath, JSON.stringify(settingsCfg, null, 2) + '\n')
+  console.log('registered : enabledPlugins[' + key + '] = true')
+}
+
+// 4. 保底那条路（默认开）：直接往 settings.json 写 hooks。
 //    插件里的 hooks 会不会被执行取决于 WorkBuddy 的版本，写这份是让"装完就能用"
 //    不押在那件事上。代价是两条都生效时同一事件会跑两遍（无害，脚本是幂等的写）。
 //    想要干净就 --plugin-only。
 if (withSettingsHooks) {
-  const settings = join(wbHome, 'settings.json')
-  backup(settings)
-  const cfg = existsSync(settings) ? readJson(settings, 'settings.json') : {}
-  const H = '$CLAUDE_PLUGIN_ROOT/hooks/'
   const h = (cmd) => [{ hooks: [{ type: 'command', command: cmd }] }]
   // 指向**已安装的插件目录**，这样脚本只有一份。
   const root = join(marketDir, 'plugins', PKG).replace(/\\/g, '/')
-  cfg.hooks = {
+  settingsCfg.hooks = {
     SessionStart: h('node "' + root + '/hooks/petpet-launch.mjs"'),
     UserPromptSubmit: h('node "' + root + '/hooks/petpet-state.mjs" working'),
     Stop: h('node "' + root + '/hooks/petpet-state.mjs" idle'),
     SubagentStart: h('node "' + root + '/hooks/petpet-subagent.mjs"'),
     SubagentStop: h('node "' + root + '/hooks/petpet-subagent.mjs"'),
   }
-  writeFileSync(settings, JSON.stringify(cfg, null, 2) + '\n')
+  writeFileSync(settingsPath, JSON.stringify(settingsCfg, null, 2) + '\n')
   console.log('registered : hooks -> settings.json（保底那条路）')
 }
 
