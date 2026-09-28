@@ -6,22 +6,27 @@
 
 ---
 
-## ⚠️ 先看清楚：这个插件里没有宠物
+## 最快的路：下带插件的那版绿色版
 
-这个包**只有"让她知道你在干活"的那部分** —— 几个 hook 脚本。宠物本体（那只画在桌面上的鲸鱼娘）在**另一个东西**里：
+👉 **[releases/latest](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest)** 里挑 **`whalegirl-workbuddy-win-x64.zip`**
 
-👉 **[下载绿色版](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest)**（Windows x64，解压双击 `启动.cmd` 就能看见她）
+那个包 = 宠物本体 + 这个插件，解压后：
 
-**两个都要装**：绿色版负责"画出来"，这个插件负责"她该吃饭还是待机"。只装这个插件，桌面上什么都不会多出来。
+1. 双击 **`启动.cmd`** —— 桌面上就有她了
+2. 双击 **`装WorkBuddy钩子.cmd`** —— 挂上联动
+3. 完全退出 WorkBuddy 再打开
 
-## 装
+（同一个 release 里还有一个 `whalegirl-petpet-win-x64.zip`，那是给 Claude Code 的，别下错。）
 
-1. 先装绿色版，确认桌面上有她（点她会挥手）
-2. 再装这个插件 —— 解压后在这个目录里跑：
+## 或者：单独装这个插件
+
+如果你已经有绿色版（Claude Code 那版）不想重下，在这个目录里跑：
 
 ```bash
 node install.mjs
 ```
+
+它会装插件 + 写 hooks。**注意这个包本身不含宠物** —— 桌宠本体得先有（绿色版 zip 里那个），否则装完桌面上什么都不会多出来。
 
 脚本会：把插件拷到 `~/.workbuddy/plugins/marketplaces/whalegirl-local/`，然后在 WorkBuddy 的两份登记文件里各加一条（**改之前会备份**成 `*.bak-whalegirl`，而且重跑不会重复加）。
 

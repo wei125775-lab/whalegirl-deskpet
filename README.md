@@ -47,9 +47,9 @@
 |---|---|---|
 | **Claude Code 版** | [PetPet](https://github.com/stshourenxy-dev/petpet-playbook) 桌宠，跟 Claude Code 联动的那只 | `node claude/install.mjs` → 按它打印的收尾。详见 [`claude/README.md`](claude/README.md) |
 | **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | 双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh。渲染器没装的话**脚本会自己检测并装上** |
-| **WorkBuddy 版** | [WorkBuddy](https://www.codebuddy.cn/work/) 里那只（**同样要先装绿色版**） | `node workbuddy/install.mjs` → 完全退出 WorkBuddy 再打开。详见 [`workbuddy/README.md`](workbuddy/README.md) |
+| **WorkBuddy 版** | [WorkBuddy](https://www.codebuddy.cn/work/) 里那只 | 下 release 里的 **`whalegirl-workbuddy-win-x64.zip`**（自带插件，不用再装别的）→ 先双击 `启动.cmd`，再双击 `装WorkBuddy钩子.cmd`。详见 [`workbuddy/README.md`](workbuddy/README.md) |
 
-> dsh 版也有打好的 zip：[`dsh-v1.9.1`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.1)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是 **Windows 绿色版**（Claude Code 那只），dsh 版得从 tag 进。
+> dsh 版也有打好的 zip：[`dsh-v1.9.1`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.1)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是**绿色版那条线**（里面有两个包：Claude Code 版和 WorkBuddy 版，按名字挑），dsh 版得从 tag 进。
 
 > 说明：dsh 版的渲染器是**另一个插件**（[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)），本包只管把素材放好、把她画出来的是它。安装脚本会先看它有没有、没有就调 `dsh plugin add` 装上（顺带把 bundle 登记好、并给它的相位白名单打上看鲸鱼要用的补丁）——**不想让它动你的插件环境就加 `--no-renderer`**。
 >
@@ -89,10 +89,15 @@ docs/preview/   README 用的预览图
 
 [WorkBuddy](https://www.codebuddy.cn/work/)（腾讯那个桌面 AI 工作台）里也能用同一只桌宠。做法和 dsh 完全不同：
 
-**她不画在 WorkBuddy 窗口里** —— 她就是你桌面上的那只（绿色版 / Claude Code 那只）；WorkBuddy 这边只有一个 **hook 插件**，负责告诉她"我在干活"。所以两件事都要做：
+**她不画在 WorkBuddy 窗口里** —— 她就是你桌面上的那只；WorkBuddy 这边只有一个 **hook 插件**，负责告诉她"我在干活"。
 
-1. 先装绿色版，确认桌面上有她
-2. `node workbuddy/install.mjs` → **完全退出 WorkBuddy 再打开**
+最省事的是下 **[release](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest) 里的 `whalegirl-workbuddy-win-x64.zip`** —— 宠物本体和插件都在里面：
+
+1. 解压，双击 `启动.cmd` —— 桌面上就有她了
+2. 双击 `装WorkBuddy钩子.cmd`
+3. **完全退出 WorkBuddy 再打开**
+
+已经有绿色版、不想重下的话，也能单独装插件：`node workbuddy/install.mjs`。
 
 装完的效果：你发消息她端碗吃饭、一轮回答结束收碗、派子代理时脚边游出一只小海豚。
 
