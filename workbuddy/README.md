@@ -29,15 +29,24 @@ node install.mjs
 
 装完可以在 WorkBuddy 的「插件管理」里看到 **whalegirl-deskpet**。
 
-### 装不上 / 装完没反应
+### 为什么默认装两份
 
-先看 `node install.mjs --dry-run` 打印的东西对不对，再试：
+WorkBuddy 支持插件带 hooks，但**"插件里的 hooks 会不会被执行"跟它的版本有关**，而"装完没反应"对普通人来说根本没法判断。所以脚本默认**两条路都写**：
+
+1. 装成插件（能出现在插件列表里、能一键卸）
+2. 同时把同一份 hook 写进 `~/.workbuddy/settings.json`（不依赖插件机制，装上一定能用）
+
+两个都生效时，同一个事件会跑两遍脚本 —— 脚本是幂等的写，只是多一次进程开销，没别的影响。
+
+**想只用插件机制**（干净、可管理）加 `--plugin-only`，代价是万一你的 WorkBuddy 版本不执行插件 hooks，就得回头再跑一次不带这个参数的。
+
+### 装完没反应
 
 ```bash
-node install.mjs --settings-hooks
+node install.mjs --dry-run
 ```
 
-多加的这个参数会把同一份 hook 直接写进 `~/.workbuddy/settings.json`（**保底那条路**）。插件的 hooks 会不会被执行跟 WorkBuddy 的版本有关，这条路不依赖插件机制，装上一定能用 —— 代价是两条都生效时同一个事件会跑两遍（脚本是幂等的，只是多跑一次，没别的影响）。
+看输出里有没有 `would also write hooks into settings.json`。没有的话是之前用过 `--plugin-only`，去掉它重跑。然后**完全退出 WorkBuddy 再打开**（hooks 是启动时读的，插件更是）。
 
 ## 她会做什么
 

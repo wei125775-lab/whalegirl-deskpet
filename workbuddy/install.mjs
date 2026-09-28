@@ -9,13 +9,17 @@
  *
  * 为什么走"市场 + 插件"而不是直接改 `~/.workbuddy/settings.json` 的 hooks：
  * 插件是 WorkBuddy 自己的机制，能出现在插件列表里、能一键卸；而 settings.json
- * 那份要用户手改 JSON，装和卸都得教一遍。**但插件里的 hooks 到底会不会被执行，
- * 依赖它的版本**，所以脚本保留了 `--settings-hooks` 这条路做保底（见下面说明）。
+ * 那份要用户手改 JSON，装和卸都得教一遍。
+ *
+ * **但默认两条都写**：插件里的 hooks 会不会被执行跟 WorkBuddy 的版本有关，而
+ * "装完没反应"对普通人来说根本没法判断 —— 所以保底那条（直接写 settings.json）
+ * 是默认开的，两个都生效时同一个事件跑两遍（脚本是幂等的写，只多一次进程开销）。
+ * 想要干净、只用插件机制就加 `--plugin-only`。
  *
  * 用法：
- *   node install.mjs                     装插件（推荐）
+ *   node install.mjs                     装插件 + 写 settings.json（保底，推荐）
+ *   node install.mjs --plugin-only       只装插件，不碰 settings.json
  *   node install.mjs --dry-run           只打印要做什么
- *   node install.mjs --settings-hooks    额外把 hooks 写进 settings.json（保底那条路）
  *   node install.mjs --workbuddy-home=<目录>   数据目录不是 ~/.workbuddy 时
  *
  * 前提：这台机器**已经装了 PetPet 桌宠本体**（绿色版 zip 里那个）。
@@ -34,7 +38,7 @@ const MARKET = 'whalegirl-local'
 const argv = process.argv.slice(2)
 const flag = (name) => argv.find((a) => a === '--' + name || a.startsWith('--' + name + '='))
 const dryRun = flag('dry-run') !== undefined
-const withSettingsHooks = flag('settings-hooks') !== undefined
+const withSettingsHooks = flag('plugin-only') === undefined
 
 const homeArg = flag('workbuddy-home')
 const home = homeArg === undefined ? '' : (homeArg.includes('=') ? homeArg.slice(homeArg.indexOf('=') + 1) : '')
@@ -162,9 +166,10 @@ installed.plugins[key] = [{
 writeFileSync(installedJson, JSON.stringify(installed, null, 2) + '\n')
 console.log('registered : ' + key + ' v' + version)
 
-// 3. 保底那条路（可选）：直接往 settings.json 写 hooks。
+// 3. 保底那条路（默认开）：直接往 settings.json 写 hooks。
 //    插件里的 hooks 会不会被执行取决于 WorkBuddy 的版本，写这份是让"装完就能用"
 //    不押在那件事上。代价是两条都生效时同一事件会跑两遍（无害，脚本是幂等的写）。
+//    想要干净就 --plugin-only。
 if (withSettingsHooks) {
   const settings = join(wbHome, 'settings.json')
   backup(settings)
