@@ -74,7 +74,8 @@ const launchExe = (exe) => {
     `-Arguments @{CommandLine='${q(exe)}'; CurrentDirectory='${q(dirname(exe))}'}; ` +
     "if ($r.ReturnValue -eq 0) { 'OK ' + $r.ProcessId } else { 'FAIL ' + $r.ReturnValue }"
   try {
-    const out = execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', timeout: 25000 })
+    // 15 秒：正常 1.5 秒就回来，给慢机器留余量；WMI 挂起时也不至于把会话启动卡太久
+    const out = execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', timeout: 15000 })
     const m = /OK (\d+)/.exec(out)
     return m ? { pid: m[1] } : { why: out.trim() || '无输出' }
   } catch (e) {
@@ -82,8 +83,12 @@ const launchExe = (exe) => {
   }
 }
 
-const WATCH = join(dirname(fileURLToPath(import.meta.url)), 'interrupt-watch.mjs')
+const SELF_DIR = dirname(fileURLToPath(import.meta.url))
+const WATCH = join(SELF_DIR, 'interrupt-watch.mjs')
 const LOG = join(PET_DIR, 'launch.log')
+// 两份实现（Claude 版那份老的 / WorkBuddy 插件版这份）往同一个 launch.log 写、格式还一样 ——
+// 带上自己是谁，否则日志里那条"已启动"根本分不清是哪份写的（2026-09-29 排查时就被这个绕过）。
+const ORIGIN = SELF_DIR.includes('.workbuddy') ? 'workbuddy' : SELF_DIR.includes('.claude') ? 'claude' : 'other'
 
 const log = (msg) => {
   try {
@@ -91,7 +96,7 @@ const log = (msg) => {
     // 写日志这一步直接 ENOENT 被吞。而"宠物没起来"的第一现场往往就是这台机器从没成功启动过，
     // 于是唯一能说明原因的 '找不到 PetPet.exe，跳过启动' 恰好是写不出来的那一条。
     mkdirSync(PET_DIR, { recursive: true })
-    appendFileSync(LOG, `[${new Date().toISOString()}] ${msg}\n`)
+    appendFileSync(LOG, `[${new Date().toISOString()}][${ORIGIN}] ${msg}\n`)
   } catch {}
 }
 
@@ -145,28 +150,42 @@ const exe = findExe()
 if (running()) {
   log('已在运行，跳过')
 } else if (!exe) {
-  log('找不到 PetPet.exe，跳过启动。用 PETPET_EXE 环境变量指定，或改本文件顶部的 EXE')
+  // 设了 PETPET_EXE 但指不到东西时，别再说"用 PETPET_EXE 指定" —— 自己指自己最绕人
+  log(EXE
+    ? `PETPET_EXE 指到的路径不存在：${EXE}，跳过启动`
+    : '找不到 PetPet.exe，跳过启动。用 PETPET_EXE 环境变量指定，或改本文件顶部的 EXE')
 } else {
-  // 先走 WMI；只有它整个不可用时才退回 spawn（那种环境下也没有 job 问题，spawn 就行）
+  // 先留一行"准备启动"：万一宿主 hook 超时先把我们杀了，日志里也得有"试过"的痕迹 ——
+  // 否则现场看起来就像钩子根本没跑（2026-09-29 排查时正是这个形态）。
+  log(`准备启动：${exe}`)
+  // 先走 WMI；只有它整个不可用时才退回 spawn
   const r = launchExe(exe)
   if (r.pid) {
     log(`已启动 pid=${r.pid}`)
     try { writeFileSync(CACHE, exe) } catch { /* 记不住，下次再找一遍 */ }
   } else {
-    log(`WMI 启动失败（${r.why}），退回直接 spawn`)
+    // 回退到 spawn。这条路上宠物**仍然在宿主的 job 里** —— "WMI 不可用"不代表"宿主不用 job"
+    // （比如组策略禁掉 Winmgmt、而 WorkBuddy 照旧），所以它随时可能被连带杀掉：下面那句
+    // "已启动"和主路径一样，只是 spawn 成功的假象。
+    log(`WMI 启动失败（${r.why}），退回直接 spawn（无 job 保护）`)
     try {
       const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: dirname(exe) })
       child.on('error', (e) => log(`启动出错：${e.message}`))
       // spawn 是异步的：失败时也能拿到 child 对象，pid 却是 undefined，
       // 所以等 spawn 事件（真的起来了）再记成功日志
-      child.on('spawn', () => log(`已启动 pid=${child.pid}（spawn 分支）`))
+      child.on('spawn', () => {
+        log(`已启动 pid=${child.pid}（spawn 分支）`)
+        // 回退成功也得记路径：否则这台机器每开一次会话都要把桌面/下载全目录扫一遍
+        try { writeFileSync(CACHE, exe) } catch { /* 记不住，下次再找一遍 */ }
+      })
       child.unref()
     } catch (e) {
       log(`启动失败：${e.message}`)
     }
   }
-  // 只在"这次真的拉起来了"时才复位状态：宠物本来就在跑的话，state.json 是当前会话的
-  // 真实状态，复位它等于凭空插一个 idle 进去（比如压缩上下文时触发 SessionStart）
+  // 走到这里就说明宠物本来不在跑（在跑的话上面那个分支就出去了），所以复位是安全的；
+  // 上面那个分支不动它，是因为那时 state.json 是当前会话的真实状态，复位等于凭空插一个
+  // idle 进去（比如压缩上下文时触发 SessionStart）。
   try {
     writeFileSync(join(PET_DIR, 'state.json'), JSON.stringify({ state: 'idle', ts: Date.now() }))
   } catch (e) {
