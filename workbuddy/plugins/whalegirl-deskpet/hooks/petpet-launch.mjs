@@ -13,8 +13,8 @@
 //      但查不出来时还是宁可不启动 —— 何必白开一个进程。
 //   3. 一切异常都吞掉只写日志。值得拖慢或搞崩的是 Claude 的启动，不是宠物。
 //
-// 已知没兜住的：同时开两个 Claude 窗口时，两个钩子可能都还没看到宠物就各拉一次
-// （要治只能给 PetPet 加单实例锁），概率极低，且右键退出多余的即可。
+// 同时开两个 Claude/WorkBuddy 窗口时，两个钩子可能都还没看到宠物就各拉一次 ——
+// 现在被 PetPet 的单实例锁兜住了（晚的那个自己退），只是白起一个进程。
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -66,8 +66,12 @@ const findExe = () => {
 // 交给 WMI 创建：父进程是 WmiPrvSE，天然不在宿主的 job 里。node 的 spawn 带不了
 // CREATE_BREAKAWAY_FROM_JOB，绕不过去，只能换个爹。
 const launchExe = (exe) => {
-  const ps = "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create " +
-    `-Arguments @{CommandLine='${exe}'; CurrentDirectory='${dirname(exe)}'}; ` +
+  // PowerShell 单引号串里的单引号要写成两个，否则整条命令语法错（路径带 ' 的机器，
+  // 比如用户名是 O'Brien）；顺带把输出转成 UTF-8，免得失败原因在日志里是乱码。
+  const q = (s) => String(s).replace(/'/g, "''")
+  const ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " +
+    "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create " +
+    `-Arguments @{CommandLine='${q(exe)}'; CurrentDirectory='${q(dirname(exe))}'}; ` +
     "if ($r.ReturnValue -eq 0) { 'OK ' + $r.ProcessId } else { 'FAIL ' + $r.ReturnValue }"
   try {
     const out = execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', timeout: 25000 })
