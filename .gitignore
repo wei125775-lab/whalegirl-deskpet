@@ -1,4 +1,7 @@
 node_modules/
 *.zip
 package.json.bak-*
-claude/whalegirl.petpack.bak
+# petpack 是构建产物（claude/pack_petpack.py 打出来的），不进版本管理：
+# 打出来 115MB，超过 GitHub 单文件 100MB 上限；zip 又没法 delta 压缩，
+# 每重打一次就往 .git 里塞一整份。素材在绿色版的 pets/ 里是齐的。
+claude/*.petpack

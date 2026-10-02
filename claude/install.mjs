@@ -12,7 +12,7 @@
  *   1. 把 claude/viewer.patch 打到 petpet-playbook 源码上（内置 diff 应用器，不强依赖 git）
  *   2. 在 viewer 里 npm install && npm run build（--no-build 可跳过）
  *   3. 四个 hook 装进 ~/.claude/hooks/，并**合并**进 ~/.claude/settings.json（先备份、只加不改）
- *   4. 把 whalegirl.petpack 解到 ~/.petpet/pets/whalegirl/
+ *   4. 把 whalegirl.petpack / naijing.petpack 解到 ~/.petpet/pets/ 下各自的目录
  *
  * **绿色版用户请加 --hooks-only**：绿色版里的 viewer 已经打好补丁，前两步不但白做，
  * 而且第 1 步要 clone github.com——墙内连不上，只会白等一轮超时再报错。
@@ -29,11 +29,15 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PATCH = join(HERE, 'viewer.patch')
-const PETPACK = join(HERE, 'whalegirl.petpack')
+// 要装的宠物清单。whalegirl 是本体；naijing 是右键彩蛋「奶鲸入侵」演完切过去的那只 ——
+// 少装它，彩蛋演到最后会切到一只不存在的宠物。老包里没有 naijing.petpack，那一项按"跳过"处理。
+const PETPACKS = [
+  { id: 'whalegirl', pack: join(HERE, 'whalegirl.petpack') },
+  { id: 'naijing', pack: join(HERE, 'naijing.petpack') },
+]
 const HOOKS = ['petpet-state.mjs', 'interrupt-watch.mjs', 'petpet-launch.mjs', 'petpet-subagent.mjs']
 const UPSTREAM = 'https://github.com/stshourenxy-dev/petpet-playbook.git'
 const UPSTREAM_TAG = 'v1.3.0'          // 补丁就是对这个版本生成的
-const PET_ID = 'whalegirl'
 
 // ---------------------------------------------------------------- 参数
 const argv = process.argv.slice(2)
@@ -415,21 +419,23 @@ function writePetExeIntoLauncher(exe) {
 
 // ---------------------------------------------------------------- 5. 宠物
 /** 包的身份标记：大小 + mtime。重打过 petpack（哪怕只换一张表）这两样必变 */
-function petpackStamp() {
+function petpackStamp(PETPACK) {
   try {
     const st = statSync(PETPACK)
     return `${st.size}-${Math.floor(st.mtimeMs)}`
   } catch { return '' }
 }
 
-function installPet() {
+// PET_ID / PETPACK 由调用方传进来（见下面 PETPACKS 的循环），函数体里的用法不变。
+function installPet(PET_ID, PETPACK) {
   // 绿色版目录里**没有** petpack（素材由「启动.cmd」负责装），必须在这里就掉头。
   // 少了这道判断，下面会一路走到"没标记 → 覆盖一次"，把已装好的素材 rmSync 掉，
   // 再去解一个根本不存在的包；解包失败只是 warn，最后照样打印「完成」——
   // 宠物就这么静悄悄没了，用户只会觉得"装完反而坏了"。
   // （2026-09-20 实测复现：跑之前目录里 3 个文件，跑之后整个目录都不在了。）
   if (!existsSync(PETPACK)) {
-    say('   本目录没有 whalegirl.petpack（绿色版就是这样）——宠物素材归「启动.cmd」管，这里只挂 hook')
+    say(`   本目录没有 ${basename(PETPACK)}——素材这步跳过（绿色版就是这样，素材归「启动.cmd」管；petpack 是构建产物，不随仓库发）`)
+    say(`   想要它：python "${join(HERE, 'pack_petpack.py')}"（从 ~/.petpet/pets/ 现打一份）`)
     return
   }
 
@@ -612,7 +618,7 @@ async function main() {
   step('4/4 装 hook、装宠物' + (root ? '、写 PetPet 路径' : ''))
   installHooks()
   writePetExeIntoLauncher(findPetExe())
-  installPet()
+  for (const p of PETPACKS) installPet(p.id, p.pack)
 
   say('\n完成。')
   if (HOOKS_ONLY) {

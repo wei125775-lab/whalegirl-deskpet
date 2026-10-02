@@ -9,7 +9,7 @@
 >
 > **`--pet-exe` 别省**：不给的话，脚本会去桌面快捷方式和几个常见位置猜 PetPet.exe，猜不到就**跳过"开 Claude 自动把她拉起来"那一步**——它不报错，你也不会知道少了什么。**`--hooks-only` 是绿色版专用**：绿色版自带的 viewer 已经打好补丁了，加上它可以省掉一次注定失败的 GitHub 连接（脚本就在解压出来的包里，整条路完全不碰网络）。
 >
-> 脚本是幂等的：重复跑不会出问题；宠物素材没换过就不动它，换过才覆盖（覆盖前备份 `pet.json`）。绿色版跑 `--hooks-only` 时**不会碰素材**——包里没有 `whalegirl.petpack`，素材归「启动.cmd」管。
+> 脚本是幂等的：重复跑不会出问题；宠物素材没换过就不动它，换过才覆盖（覆盖前备份 `pet.json`）。绿色版跑 `--hooks-only` 时**不会碰素材**——包里没有 `.petpack`，素材归「启动.cmd」管。
 
 跟仓库根目录那套 dsh 版的区别：这是**精灵表 + pet.json v3** 的格式，走 PetPet 框架；dsh 那套是 **frames2d + manifest v2**，走 `@linxin666/dsh-pet` 插件。素材是同一批，动作逻辑也一样，只是打包格式不同。
 
@@ -41,7 +41,7 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 1. 找到（本机找不到就 clone）petpet-playbook 源码
 2. 把 `viewer.patch` 打上去（内置 diff 应用器，不强依赖 git，能容忍行尾 CRLF/LF 差异）
 3. 在 viewer 里 `npm install && npm run build`
-4. 四个 hook 放进 `~/.claude/hooks/`、**合并**进 `~/.claude/settings.json`（先备份、只加不改、不覆盖你原有配置）；再把 `whalegirl.petpack` 解到 `~/.petpet/pets/whalegirl/`
+4. 四个 hook 放进 `~/.claude/hooks/`、**合并**进 `~/.claude/settings.json`（先备份、只加不改、不覆盖你原有配置）；再把 `whalegirl.petpack`、`naijing.petpack` 分别解到 `~/.petpet/pets/` 下各自的目录
 
 常用参数：`--hooks-only`（只装 hook + 宠物，跳过源码那三步——**绿色版用户加这个**）、`--viewer <源码路径>`、`--pet-exe <PetPet.exe 路径>`（写进 SessionStart 钩子，开 Claude 自动拉起她）、`--no-build`、`--force`。
 
@@ -52,9 +52,9 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
 
 ### 它到底改了什么 / 不打补丁会怎样
 
-- **补丁**是对 petpet-playbook **v1.3.0** 生成的（5 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs` / `pet-import.cjs`）。补丁开头有一份完整的改动清单（编号 ①~⑲），摘要：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`、动作可标 `hold`（何时离开由外部信号决定，不参与自动转移链）、`loop: false` 的动作一律按一次性处理**且播完即走**、窗口几何 IPC 加 NaN 守卫、窗口默认 `focusable: false`（点她不再把焦点从终端抢走）、`petpet://` 协议补 `corsEnabled`、气泡文案分场景、**加单实例锁**（否则启动两份就并排出现两只宠物）、外部状态的"文件里是什么"和"上次发过什么"拆成两个变量、**精灵表支持折行**（帧数一多，单行排的表宽 = 帧数×帧宽，会超过 GPU 的最大纹理边长 16384；超限时纹理创建是**静默失败**的——不报错，只是那个动作永远加载不出来，点上去毫无反应。配套改掉了 `main.js` 和 `pet-import.cjs` 里按"帧宽×帧数"预估表宽的两处老校验，它们同样假设所有帧排成一行，会把折行表算出根本没发生过的宽度、把合法宠物拦在门外）、**连点摔倒**（2.5 秒内点够 8 次她绊一跤坐地上，坐满 3 秒自己爬起来，这三段播放期间点击一律不响应）、**导入宠物包用系统自带的 tar**（裸名 `tar` 在装了 Git 的机器上命中的是 GNU tar，它不认 zip；顺带一个更隐蔽的后果是解压前的"总量 / 单文件 / 压缩比"三道预算校验靠 `tar -tvf` 的字段位置取 size，GNU tar 的列排布不同会解析出空数组，**三条上限全部静默失效**）、**隐藏窗口时的系统通知从来没发出过**（Electron 主进程没有全局 `Notification`，那句 `new Notification(...)` 一直在抛 `ReferenceError`、被调用处的 try/catch 吞掉）、**干活期间重启桌宠她会整轮待机**（首帧状态在渲染层注册监听之前就推走了，而去重标记已经记下、之后不再重发）、**摔倒动作表不全时会锁死左键**（`canTrip()` 原来只查 `fall` / `sit`，`recover` 缺失就卡在一个没有出口的 hold 里；现在三段齐备才允许摔，真卡住也会自己回待机），外加几处上游 viewer 自己的 bug（提醒重启后不恢复、窗口位置根本不保存、日记窗口会出界等）。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按补丁里每处的注释手工合并即可。
+- **补丁**是对 petpet-playbook **v1.3.0** 生成的（5 个文件：`viewer/main.js` / `src/main.ts` / `src/state-priority.ts` / `preload.cjs` / `pet-import.cjs`）。补丁开头有一份完整的改动清单（编号 ①~㉑），摘要：干活时动作可按权重换（`variants`）、收碗动作可分开（`variants[].putaway`）、外部状态多一个 `interrupted`、动作可标 `hold`（何时离开由外部信号决定，不参与自动转移链）、`loop: false` 的动作一律按一次性处理**且播完即走**、窗口几何 IPC 加 NaN 守卫、窗口默认 `focusable: false`（点她不再把焦点从终端抢走）、`petpet://` 协议补 `corsEnabled`、气泡文案分场景、**加单实例锁**（否则启动两份就并排出现两只宠物）、外部状态的"文件里是什么"和"上次发过什么"拆成两个变量、**精灵表支持折行**（帧数一多，单行排的表宽 = 帧数×帧宽，会超过 GPU 的最大纹理边长 16384；超限时纹理创建是**静默失败**的——不报错，只是那个动作永远加载不出来，点上去毫无反应。配套改掉了 `main.js` 和 `pet-import.cjs` 里按"帧宽×帧数"预估表宽的两处老校验，它们同样假设所有帧排成一行，会把折行表算出根本没发生过的宽度、把合法宠物拦在门外）、**连点摔倒**（2.5 秒内点够 8 次她绊一跤坐地上，坐满 3 秒自己爬起来，这三段播放期间点击一律不响应）、**导入宠物包用系统自带的 tar**（裸名 `tar` 在装了 Git 的机器上命中的是 GNU tar，它不认 zip；顺带一个更隐蔽的后果是解压前的"总量 / 单文件 / 压缩比"三道预算校验靠 `tar -tvf` 的字段位置取 size，GNU tar 的列排布不同会解析出空数组，**三条上限全部静默失效**）、**隐藏窗口时的系统通知从来没发出过**（Electron 主进程没有全局 `Notification`，那句 `new Notification(...)` 一直在抛 `ReferenceError`、被调用处的 try/catch 吞掉）、**干活期间重启桌宠她会整轮待机**（首帧状态在渲染层注册监听之前就推走了，而去重标记已经记下、之后不再重发）、**摔倒动作表不全时会锁死左键**（`canTrip()` 原来只查 `fall` / `sit`，`recover` 缺失就卡在一个没有出口的 hold 里；现在三段齐备才允许摔，真卡住也会自己回待机），外加几处上游 viewer 自己的 bug（提醒重启后不恢复、窗口位置根本不保存、日记窗口会出界等）。**⑳** 修 ⑲ 带出来的回归（`'idle'` 被挡在保留上一版状态的白名单外）、**㉑** 去掉双击回默认大小（双击必然先触发两次 click，她会连做两个点击动作再缩回去，逗她的时候特别容易误触）。上游比 v1.3.0 新的话可能打不上，脚本会明确报出来——按补丁里每处的注释手工合并即可。
 - **装过旧版补丁的注意**：脚本判断"补丁打没打过"看的是几个**只有最新补丁才有的**特征串（比如 `main.js` 里有没有 `requestSingleInstanceLock`）。旧补丁缺它，所以重跑 `install.mjs` 会**尝试重打**——但旧改动还在、上下文对不上，多半会报"打不上"，这时要么照 `claude/viewer.patch` 手工合并那几处，要么把 `viewer/` 还原到 v1.3.0 再装一遍。（更早的版本是"命中任一关键词就跳过"，那样会静默漏掉后加的修复，已经改掉。）
-- **`whalegirl.petpack` 就是个 zip**：顶层 `whalegirl/` 目录，里面 `pet.json` + 16 张精灵表（17 个动作——`putaway` 和 `subagent_putaway` 共用同一张）；也能用 PetPet 托盘菜单「导入宠物包」手动装。
+- **`.petpack` 就是个 zip**：顶层 `<宠物 id>/` 目录，里面 `pet.json` + 每个动作一张精灵表。有两只：`whalegirl.petpack`（17 张表 / 18 个动作——`putaway` 和 `subagent_putaway` 共用同一张）、`naijing.petpack`（奶鲸，3 张表）。**两只都要装**：whalegirl 的 `pet.json` 里写着 `invasion.to = naijing`，右键菜单那条入侵动画播完会切到奶鲸，少装它就切到一只不存在的宠物。也能用 PetPet 托盘菜单「导入宠物包」手动装。**这两个文件不在仓库里**（`whalegirl.petpack` 打出来 115MB，超过 GitHub 单文件 100MB 上限）——用绿色版的话素材已经在它的 `pets/` 里、由 `启动.cmd` 装好，根本用不着 petpack；真想要就 `python claude/pack_petpack.py` 从 `~/.petpet/pets/` 现打一份。
 - **不打补丁也能跑**：那几个字段会被忽略——永远吃普通的小口饭、点她只会挥手、被打断只是停下（没有屑表情），不会报错、不会卡住。**但前面那个几何 IPC 守卫属于稳定性修复**，不打的话拖拽/缩放时一旦算出坏坐标，主进程会直接弹框退出（是上游 v1.3.0 自带的隐患，不是这个宠物包引入的）。
 
 ### 手动装（不想跑脚本，或脚本卡住了）
@@ -67,7 +67,7 @@ node install.mjs --dry-run   # 先看它会改什么，什么都不动
    cd viewer && npm install && npm run build
    ```
 3. 绿色版再把 `viewer/dist/` 整个覆盖进 `resources/app/dist/`（先删旧的）。
-4. 托盘菜单 → **导入宠物包** → 选 `whalegirl.petpack`。
+4. 托盘菜单 → **导入宠物包** → 选一个 `.petpack`（仓库里没有，见上一节末怎么得到）。
 5. 四个 hook 按下节的手动配置来挂。
 
 ---

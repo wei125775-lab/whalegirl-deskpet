@@ -37,7 +37,7 @@
 
 ## 装
 
-**最省事：下 [绿色版](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest)** —— Windows x64，解压后双击 `启动.cmd` 就有她。不用装 Node、不用 clone 源码、不用编译。代价是包大（200MB，整个 Electron 运行时都在里面）。
+**最省事：下 [绿色版](https://github.com/wei125775-lab/whalegirl-deskpet/releases/latest)** —— Windows x64，解压后双击 `启动.cmd` 就有她。不用装 Node、不用 clone 源码、不用编译。代价是包大（约 270MB，整个 Electron 运行时都在里面）。
 
 > ⚠️ **双击时可能弹「Windows 已保护你的电脑」**——点「更多信息」→「仍要运行」即可，不是文件坏了。浏览器下载的 zip 会被打上「来自 Internet」标记，解压时传给里面的文件，Windows 对没签名的程序都会拦这一次。**交给 AI 装的话它可以帮你把这行去掉**（见下面的「给 AI 的一句话」）。
 
@@ -49,7 +49,7 @@
 | **dsh 版** | [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（桌面外壳 DshDesktop）里那只 | 双击根目录的 `install.cmd`（或 `node install.mjs`）→ 重启 dsh。渲染器没装的话**脚本会自己检测并装上** |
 | **WorkBuddy 版** | [WorkBuddy](https://www.codebuddy.cn/work/) 里那只 | 下 release 里的 **`whalegirl-workbuddy-win-x64.zip`**（自带插件，不用再装别的）→ 先双击 `启动.cmd`，再双击 `装WorkBuddy钩子.cmd`。详见 [`workbuddy/README.md`](workbuddy/README.md) |
 
-> dsh 版也有打好的 zip：[`dsh-v1.9.1`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.1)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是**绿色版那条线**（里面有两个包：Claude Code 版和 WorkBuddy 版，按名字挑），dsh 版得从 tag 进。
+> dsh 版也有打好的 zip：[`dsh-v1.9.2`](https://github.com/wei125775-lab/whalegirl-deskpet/releases/tag/dsh-v1.9.2)（73MB）——解压后跟 clone 下来一样跑 `install.cmd`，不用 clone、不用装依赖。注意 `releases/latest` 指的是**绿色版那条线**（里面有两个包：Claude Code 版和 WorkBuddy 版，按名字挑），dsh 版得从 tag 进。
 
 > 说明：dsh 版的渲染器是**另一个插件**（[`@linxin666/dsh-pet`](https://www.npmjs.com/package/@linxin666/dsh-pet)），本包只管把素材放好、把她画出来的是它。安装脚本会先看它有没有、没有就调 `dsh plugin add` 装上（顺带把 bundle 登记好、并给它的相位白名单打上看鲸鱼要用的补丁）——**不想让它动你的插件环境就加 `--no-renderer`**。
 >
