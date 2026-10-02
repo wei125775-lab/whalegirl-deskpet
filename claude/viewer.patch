@@ -105,6 +105,9 @@
 #    发：状态一进工作态就再也回不去，表现为"干完活她一直端着碗吃"（2026-09-22 用户报
 #    "她现在还在吃饭"）。⑲ 的初衷（认不出来的值保留上一版，别让撕裂读把她打回待机）不变，
 #    只把 'idle' 补进白名单
+# ㉑ 去掉双击回默认大小（2026-09-29）：双击必然先触发两次 click，她会连做两个点击动作，
+#    然后才缩回默认大小——逗她的时候手快一点就被判成双击，特别容易误触（用户报"连续两次
+#    点击她就变成原本大小"）。滚轮缩放和托盘里的"恢复默认大小"都保留，只是不再绑 dblclick
 # 上游若已改动这些文件，请按同样思路手工合并（每处都有注释说明意图）。
 
 
@@ -114,7 +117,7 @@
 
 --- a/viewer/main.js
 +++ b/viewer/main.js
-@@ -1,11 +1,23 @@
+@@ -1,12 +1,24 @@
  // PetPet 桌宠查看器 - 主进程
  // Electron 主进程：透明窗口、托盘、IPC 文件读取
 -const { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, protocol, net, dialog } = require('electron')
@@ -129,7 +132,7 @@
 -const { importPetDir, importPetZip } = require('./pet-import.cjs')
 +const { importPetDir, importPetZip, pngSize, webpSize, jpgSize, gifSize, bmpSize } = require('./pet-import.cjs')
  const { safePetId, isSafeUnderRoot } = require('./security-utils.cjs')
-+
+ 
 +// 单实例：启动第二份就会并排出现两只宠物。调试期反复重启、旧进程没退干净时最明显
 +// （2026-09-17 用户报"经常性出现两只"）。抢不到锁的直接退——quit() 是异步的，
 +// 不跟着 exit 的话下面 whenReady 照样会跑起来，又开一个窗口出来。
@@ -137,9 +140,10 @@
 +  app.quit()
 +  process.exit(0)
 +}
- 
++
  const PETS_ROOT = path.join(app.getPath('home'), '.petpet', 'pets')
  
+ // P0（2026-08-09 红苕爸爸 Windows 实测暴露）：启动即自动创建宠物目录，
 @@ -33,7 +45,9 @@
  // N-3：注册自定义协议（需在 app ready 前），渲染层用短 URL 流式读资产
  // petpet://<petId>/<relPath> → 文件系统，零 base64、零主进程内存驻留
@@ -238,11 +242,10 @@
    // macOS 专属 API；Windows 上调用可能异常 → 平台保护（2026-08-08 Win11 点图标无反应排查）
    if (process.platform === 'darwin') {
      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-@@ -118,6 +181,18 @@
-   } else {
+@@ -119,6 +182,18 @@
      mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'))
    }
-+
+ 
 +  // 页面装完把两个"发过就别忘了"标记清掉，逼下一轮重发一次。
 +  //
 +  // 渲染层的 onPetState/onSubagent 监听器要到 setupUI() 才注册，而每秒轮询在窗口建好后很快就
@@ -254,9 +257,10 @@
 +    lastStateSent = ''
 +    lastSubagentCount = -1
 +  })
- 
++
    mainWindow.on('closed', () => { mainWindow = null })
  }
+ 
 @@ -231,6 +306,21 @@
    })
  }
@@ -295,7 +299,7 @@
  })
  
  function toggleWindow() {
-@@ -270,13 +367,21 @@
+@@ -270,14 +367,22 @@
  }
  
  // P0-4: 从托盘/菜单打开提醒面板前，先解除窗口穿透 + 抢焦点（否则面板点不动、键盘输不进去）
@@ -309,15 +313,16 @@
    mainWindow.focus()
    send('open:reminder')
  }
-+
+ 
 +ipcMain.on('reminder:panel-closed', () => {
 +  if (!mainWindow || mainWindow.isDestroyed()) return
 +  mainWindow.setFocusable(false)
 +})
- 
++
  // ---------- IPC：宠物资产读取 ----------
  // 列出 ~/.petpet/pets 下的宠物
-@@ -285,12 +390,37 @@
+ ipcMain.handle('pet:list', () => {
+@@ -285,13 +390,38 @@
      const dirs = fs.readdirSync(PETS_ROOT, { withFileTypes: true })
        .filter(d => d.isDirectory())
        .map(d => d.name)
@@ -330,7 +335,7 @@
      return []
    }
  })
-+
+ 
 +// 读精灵表的真实宽高（只读头部，见 pet-import.cjs 的 readHead 那套）。
 +// 给 pet:load 的纹理上限校验用：那里原来按"帧宽×帧数"估宽，折行的表会被估出一个
 +// 根本没发生过的宽度（见调用处注释）。读不到就返回 null，调用方回落老公式。
@@ -353,9 +358,10 @@
 +    return null
 +  }
 +}
- 
++
  // 读取 pet.json
  ipcMain.handle('pet:load', (_evt, petId) => {
+   try {
 @@ -303,6 +433,7 @@
      // D-5: 数值上限校验（2026-08-09，外部审计指出恶意 pet.json 可构造资源炸弹；上限对齐 pipeline/validate_pet.py 纹理铁律）
      // AI 工具审计 V-05：补乘积校验（frameWidth×frames 单查必过但组合可构造 819 万像素宽纹理）+ actions 键数上限
@@ -498,7 +504,7 @@
      return { error: '时间无效' }
    }
    const repeat = ['none', 'daily', 'weekly'].includes(spec.repeat) ? spec.repeat : 'none'
-@@ -609,23 +817,137 @@
+@@ -609,24 +817,138 @@
    }
    send('reminder:fire', { id, text: r.text })
    appendActivity(currentPetId || '', { mood: '提醒', text: `${currentPetName || '宠物'}提醒你：` + r.text })
@@ -628,7 +634,7 @@
 +  try { pollSubagents() } catch (e) { console.warn('[PetPet] 子代理轮询出错：', e) }
 +  try { nudgeHitTest() } catch (e) { console.warn('[PetPet] 穿透重算出错：', e) }
  }, 1000)
-+
+ 
 +// 光标位置的高频喂送，理由见 pushCursor。60ms 是个折中：再快也只是让窗口更早"醒"，收益
 +// 远不如多出来的 IPC；再慢用户就又要等那半秒了
 +setInterval(() => { try { pushCursor() } catch (e) { console.warn('[PetPet] 光标位置推送出错：', e) } }, 60)
@@ -640,9 +646,10 @@
 +    try { powerMonitor.on(ev, () => nudgeHitTest()) } catch (e) { /* 该平台没有这个事件 */ }
 +  }
 +}
- 
++
  // ---------- 生命周期 ----------
  // 截图测试模式：electron . --screenshot=/tmp/x.png [--action=run]
+ const shotArg = process.argv.find(a => a.startsWith('--screenshot='))
 @@ -635,6 +957,9 @@
  const openReminderArg = process.argv.includes('--open-reminder')
  
@@ -653,10 +660,9 @@
    registerPetpetProtocol()  // N-3：自定义协议（CSP 已放行 petpet:）
    createWindow()
    // macOS Dock 图标：示例宠物头像（内嵌 base64，打包后有效；换宠物时替换此图标）
-
 --- a/viewer/preload.cjs
 +++ b/viewer/preload.cjs
-@@ -23,6 +23,12 @@
+@@ -23,5 +23,11 @@
    notifyAction: (info) => ipcRenderer.send('pet:action:notify', info),
    openDiary: (petId) => ipcRenderer.send('diary:open', petId),
    onOpenReminder: (cb) => ipcRenderer.on('open:reminder', () => cb()),
@@ -668,8 +674,6 @@
 +  onRehit: (cb) => ipcRenderer.on('pet:rehit', (_e, p) => cb(p)),  // 窗口尺寸/位置变了 → 用最新光标位置重算穿透
 +  onCursor: (cb) => ipcRenderer.on('pet:cursor', (_e, p) => cb(p)), // 60ms 一次的光标位置（穿透态下 mousemove 到不了渲染层）
  })
- 
-
 --- a/viewer/src/main.ts
 +++ b/viewer/src/main.ts
 @@ -4,7 +4,8 @@
@@ -682,7 +686,7 @@
  import { effectiveWeight } from './temperament' // V2-A: 气质调制器（2026-08-09）
  
  // ================= 类型 =================
-@@ -20,8 +21,26 @@
+@@ -20,19 +21,40 @@
    frameHeight?: number
    scale?: number
    transitions?: Record<string, number>
@@ -693,8 +697,8 @@
 +  variants?: { action: string; weight: number; putaway?: string }[] // 本地扩展：外部信号（干活）时按权重换成别的动作，见 pickWorkAction；putaway 指定这碗用哪条收碗动作
    label?: string // v3：菜单显示名（优先于内置映射）
    diary?: { mood: string; text: string } // v3：动作→日记心情文案（优先于内置映射）
-+}
-+
+ }
+ 
 +// 本地扩展：叠加层。一张独立精灵表，按数量叠在角色上（子代理 → 脚边游几只小海豚）。
 +// 之所以是独立图层而不是一个动作：动作是整帧替换，没法"她照常吃饭、脚边多两只海豚"。
 +interface PetOverlaySpec {
@@ -706,10 +710,11 @@
 +  frameHeight?: number
 +  scale?: number        // 叠加层相对角色的额外缩放
 +  slots: { x: number; y: number; scale?: number }[]  // 每个实例的位置：相对角色画布中心的偏移（画布像素）
- }
- 
++}
++
  interface PetJson {
-@@ -30,9 +49,12 @@
+   version: number
+   id: string
    name: string
    theme?: string
    bubbles?: string[] // v3：互动气泡文案池（优先于内置 BUBBLE_TEXTS）
@@ -927,7 +932,7 @@
        lastIgnore = shouldIgnore
        window.petAPI.setIgnoreMouse(shouldIgnore, true)
      }
-@@ -184,17 +317,86 @@
+@@ -184,17 +317,87 @@
    document.addEventListener('pointermove', updateMouseIgnore, true)
    // 初始穿透
    setTimeout(() => window.petAPI.setIgnoreMouse(true, true), 300)
@@ -952,7 +957,8 @@
 +  let downSeen = false
    let lastPointerUp = 0
 -  app.canvas.addEventListener('pointerdown', (e) => { downPos = { x: e.clientX, y: e.clientY } })
-+  // 连击计数：短窗内累计，触发比心后清零。不用 dblclick——那个已经绑给 resetZoom 了。
++  // 连击计数：短窗内累计，触发比心后清零。自己数而不用 dblclick——系统双击窗口太短，
++  // 这里要的是"连着戳够 4 下"。
 +  let clickStreak = 0
 +  let lastClickTs = 0
 +  const STREAK_WINDOW = 600
@@ -967,12 +973,12 @@
 +  })
    app.canvas.addEventListener('pointerup', (e) => {
      lastPointerUp = Date.now()
-+    const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
+-    if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
+     const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
+-    if (dist < 6) showBubbleText() // 单击 = 互动气泡
 +    const hadDown = downSeen
 +    downSeen = false
-     if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
--    const dist = Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y)
--    if (dist < 6) showBubbleText() // 单击 = 互动气泡
++    if (e.button !== 0) return // 只处理左键（右键走 contextmenu 菜单）
 +    // hadDown 为假说明 down 压根没收到，downPos 还停在上一次点击的残值——拿它算出来的 dist
 +    // 是"这次松手的位置到上次点击的位置"，毫无意义，只会把点击误判成拖拽。而且按下都没收到，
 +    // 拖拽本来也没开始，这时候按点击处理才是用户的本意（2026-09-20 长按点不动就是这个）
@@ -1017,7 +1023,20 @@
    })
  
    // 右键 → 原生 macOS 菜单（主进程 Menu.popup，自动毛玻璃/定位）
-@@ -338,17 +540,185 @@
+@@ -225,12 +428,6 @@
+     }
+   }, { passive: false })
+ 
+-  // 双击 → 恢复默认大小（绝不缩小）
+-  app.canvas.addEventListener('dblclick', (e) => {
+-    e.preventDefault()
+-    resetZoom()
+-  })
+-
+   // 托盘事件
+   window.petAPI.onZoom((f) => applyZoom(f))
+   window.petAPI.onReset(() => resetZoom())
+@@ -338,31 +535,199 @@
    const cols = Math.max(1, Math.floor(tex.width / cw))
    const frames: PIXI.Texture[] = []
    for (let i = 0; i < act.frames; i++) {
@@ -1035,8 +1054,8 @@
      }))
    }
    textures[name] = frames
-+}
-+
+ }
+ 
 +// ================= 叠加层 =================
 +// 和动作的区别：动作是整帧替换，同一时刻只能有一个；叠加层是"角色照常演，额外再画几层"。
 +// 外部按数量驱动（主进程每秒数一遍在跑的子代理个数 → pet:overlay），所以这里只做增删同步。
@@ -1167,12 +1186,12 @@
 +    console.log('[子代理] 都跑完了 → 鲸鱼沉入')
 +    if (textures['subagent_out']) requestAction('subagent_out', 'external')
 +  }
- }
- 
- function updateTitle() {
-   if (pet) document.title = `PetPet - ${pet.name}`
 +}
 +
+ function updateTitle() {
+   if (pet) document.title = `PetPet - ${pet.name}`
+ }
+ 
 +// ================= 摔倒（连点触发） =================
 +// 用户猛戳她够多次（RAPID_WINDOW 内 RAPID_AFTER 下）就绊一跤：fall -> sit -> recover
 +// 三段，素材来自"摔倒视频.mp4"，构建见 D:\序列帧动画\tools\build_fall.py。
@@ -1201,10 +1220,10 @@
 +  // 而 inFallSeq() 正是拿 currentAction 当点击锁的——等于左键被锁死、点她毫无反应，只能重启。
 +  // （recover 52×545 那种超宽表在纹理上限边缘，静默失败的风险不是假想的。）
 +  return FALL_SEQ.every((n) => !!textures[n] && textures[n].length > 0)
- }
- 
++}
++
  // ================= 动作播放 =================
-@@ -356,13 +726,13 @@
+ // 动作请求仲裁：所有触发源统一走这里（P0 状态仲裁层）
  // - menu/init：用户主动/初始加载 → 直接执行
  // - reminder：提醒必须显示 → 直接执行
  // - random：随机行为 → 仅在待机时允许（不再打断任何动作）
@@ -1220,7 +1239,7 @@
    if (!pet || !textures[name] || textures[name].length === 0) return
    // P1-7: 随机行为不写日记（12s 一条会把 100 条日记 20 分钟冲光）——只有用户主动/提醒才记录
    if (source !== 'random' && name !== 'idle' && name !== currentAction) logActionActivity(name)
-@@ -394,13 +764,38 @@
+@@ -394,13 +759,38 @@
      })
    }
  
@@ -1262,7 +1281,7 @@
  }
  
  // 缩放约束：0.5x ~ 2x（窗口跟随缩放，永远完整显示全身，不裁切）
-@@ -426,12 +821,21 @@
+@@ -426,12 +816,21 @@
  
    const newX = Math.round(curWinX + (curWinW - newW) / 2)
    const newY = Math.round(curWinY + (curWinH - newH) / 2)
@@ -1290,7 +1309,7 @@
  }
  
  function applyZoom(factor: number) {
-@@ -454,14 +858,32 @@
+@@ -454,14 +853,32 @@
  }
  
  // ================= 气泡 =================
@@ -1326,7 +1345,7 @@
  
    if (bubbleTimer) clearTimeout(bubbleTimer)
    bubbleTimer = setTimeout(() => {
-@@ -485,7 +907,16 @@
+@@ -485,7 +902,16 @@
  // ================= 文案数据优先（v3 数据下沉） =================
  // pet.json 的 bubbles / diary / label 优先，代码常量仅作兜底（docs/08 §2.2）
  function bubblePool(): string[] {
@@ -1344,7 +1363,7 @@
  }
  
  function resolveActionDiary(name: string): { mood: string; text: string } | undefined {
-@@ -515,6 +946,7 @@
+@@ -515,6 +941,7 @@
  
  function closeReminderPanel() {
    document.getElementById('reminder-panel')!.classList.add('hidden')
@@ -1352,7 +1371,7 @@
  }
  
  async function submitReminder() {
-@@ -590,11 +1022,88 @@
+@@ -590,12 +1017,89 @@
        app.ticker.stop()
      }
    })
@@ -1400,7 +1419,7 @@
  // ================= 随机行为 =================
  // P0：随机触发经 requestAction('random') 仲裁——只在待机时触发（守卫已在 shouldPlay），
  // 且回 idle 带守卫：仅当“当前仍是本次随机动作”时才回（修复：用户/提醒打断后不再被强制拉回 idle）
-+
+ 
 +// 按权重把基础动作换成别的动作：pet.json 的 `actions.<基础动作>.variants`。
 +// 鲸鱼娘配了两处——干活时 10% 把 eat 换成 eat_mid（中口吃）、点她时 8% 把 wave 换成 smug（屑表情）。
 +// 权重按百分比理解：变体权重之和就是"换掉"的概率，剩下的归基础动作；没配 variants 时永远返回基础动作，
@@ -1438,10 +1457,11 @@
 +  }
 +  return 'putaway'
 +}
- 
++
  // 统一行为链调度（替代原内联 4s 补丁）：
  // 按时长 frames/fps 估算（钳制 2–12s）；到点且未被更高优先级动作打断时，
-@@ -603,7 +1112,11 @@
+ // 有 transitions 则按权重转移（transition 源），否则回 idle（init 源）
+@@ -603,7 +1107,11 @@
    if (transitionTimer) { clearTimeout(transitionTimer); transitionTimer = null }
    const act = pet?.actions?.[name]
    if (!act) return
@@ -1454,7 +1474,7 @@
    transitionTimer = setTimeout(() => {
      transitionTimer = null
      if (!pet || currentAction !== name) return
-@@ -620,7 +1133,14 @@
+@@ -620,7 +1128,14 @@
          }
        }
      }
@@ -1470,7 +1490,7 @@
      requestAction('idle', 'init')
    }, durMs)
  }
-@@ -652,6 +1172,9 @@
+@@ -652,6 +1167,9 @@
  // ================= 启动 =================
  // P0-2：可见的错误反馈（不透明卡片，替代透明窗口里的静默失败）
  function showFatal(msg: string) {
@@ -1480,7 +1500,6 @@
    const bubble = document.getElementById('bubble')!
    bubble.textContent = '⚠️ ' + msg
    bubble.classList.remove('hidden')
-
 --- a/viewer/src/state-priority.ts
 +++ b/viewer/src/state-priority.ts
 @@ -3,7 +3,7 @@
@@ -1522,7 +1541,6 @@
    if (req.source === 'random') return currentAction === 'idle'
    if (req.source === 'transition') return true
    return priorityOf(req.name) > priorityOf(currentAction)
-
 --- a/viewer/pet-import.cjs
 +++ b/viewer/pet-import.cjs
 @@ -20,6 +20,14 @@
